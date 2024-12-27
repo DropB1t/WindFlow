@@ -375,6 +375,11 @@ public:
         return isGpuOP;
     }
 
+    virtual size_t getHybridParallelism() const
+    {
+        return 0;
+    }
+
     Basic_Operator(Basic_Operator &&) = delete; ///< Move constructor is deleted
     Basic_Operator &operator=(const Basic_Operator &) = delete; ///< Copy assignment operator is deleted
     Basic_Operator &operator=(Basic_Operator &&) = delete; ///< Move assignment operator is deleted

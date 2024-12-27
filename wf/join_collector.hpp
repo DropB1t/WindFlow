@@ -137,7 +137,10 @@ public:
                    id(0),
                    next_id(0)
     {
-        assert(execution_mode == Execution_Mode_t::DEFAULT && _ordering_mode == ordering_mode_t::TS && _interval_join_mode == Join_Mode_t::DP); // sanity check
+        assert(execution_mode == Execution_Mode_t::DEFAULT &&
+               _ordering_mode == ordering_mode_t::TS       &&
+               (_interval_join_mode == Join_Mode_t::DP || _interval_join_mode == Join_Mode_t::HP)
+              ); // sanity check
     }
 
     // svc_init method (utilized by the FastFlow runtime)
