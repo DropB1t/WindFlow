@@ -61,14 +61,16 @@ int main(int argc, char *argv[])
     size_t n_keys = 1;
     int64_t lower_bound = 0;
     int64_t upper_bound = 0;
+    size_t join_degree = 1;
+    size_t hybrid_parallelism_degree = 1;
     // initalize global variable
     global_sum = 0;
     // arguments from command line
-    if (argc != 11) {
+    if (argc != 15) {
         cout << argv[0] << " -r [runs] -l [stream_length] -k [n_keys] -L [lower bound in msec] -U [upper bound in msec]" << endl;
         exit(EXIT_SUCCESS);
     }
-    while ((option = getopt(argc, argv, "r:l:k:L:U:")) != -1) {
+    while ((option = getopt(argc, argv, "r:l:k:L:U:P:H:")) != -1) {
         switch (option) {
             case 'r': runs = atoi(optarg);
                      break;
@@ -79,6 +81,10 @@ int main(int argc, char *argv[])
             case 'L': lower_bound = atoi(optarg);
                     break;
             case 'U': upper_bound = atoi(optarg);
+                    break;
+            case 'P': join_degree = atoi(optarg);
+                    break;
+            case 'H': hybrid_parallelism_degree = atoi(optarg);
                     break;
             default: {
                 cout << argv[0] << " -r [runs] -l [stream_length] -k [n_keys] -L [lower bound in msec] -U [upper bound in msec]" << endl;
@@ -93,15 +99,15 @@ int main(int argc, char *argv[])
     size_t max = 9;
     std::uniform_int_distribution<std::mt19937::result_type> dist_p(min, max);
     std::uniform_int_distribution<std::mt19937::result_type> dist_b(0, 10);
-    int map1_degree, map2_degree, join_degree, filter_degree, sink1_degree, sink2_degree;
-    size_t source1_degree = dist_p(rng);
-    size_t source2_degree = dist_p(rng);
+    int map1_degree, map2_degree, filter_degree, sink1_degree, sink2_degree;
+    size_t source1_degree = 2; dist_p(rng);
+    size_t source2_degree = 2; dist_p(rng);
     long last_result = 0;
     // executes the runs in DEFAULT mode
     for (size_t i=0; i<runs; i++) {
         map1_degree = dist_p(rng);
         map2_degree = dist_p(rng);
-        join_degree = dist_p(rng);
+        //join_degree = dist_p(rng);
         filter_degree = dist_p(rng);
         sink1_degree = dist_p(rng);
         sink2_degree = dist_p(rng);
@@ -140,14 +146,14 @@ int main(int argc, char *argv[])
         Source source1 = Source_Builder(source_functor_positive)
                             .withName("source1")
                             .withParallelism(source1_degree)
-                            .withOutputBatchSize(dist_b(rng))
+                            //.withOutputBatchSize(dist_b(rng))
                             .build();
         MultiPipe &pipe1 = graph.add_source(source1);
         Map_Functor map_functor1;
         Map map1 = Map_Builder(map_functor1)
                         .withName("map1")
                         .withParallelism(map1_degree)
-                        .withOutputBatchSize(dist_b(rng))
+                        //.withOutputBatchSize(dist_b(rng))
                         .build();
         pipe1.chain(map1);
         // prepare the second MultiPipe
@@ -155,14 +161,14 @@ int main(int argc, char *argv[])
         Source source2 = Source_Builder(source_functor_negative)
                             .withName("source2")
                             .withParallelism(source2_degree)
-                            .withOutputBatchSize(dist_b(rng))
+                            //.withOutputBatchSize(dist_b(rng))
                             .build();
         MultiPipe &pipe2 = graph.add_source(source2);
         Map_Functor map_functor2;
         Map map2 = Map_Builder(map_functor2)
                         .withName("map2")
                         .withParallelism(map2_degree)
-                        .withOutputBatchSize(dist_b(rng))
+                        //.withOutputBatchSize(dist_b(rng))
                         .build();
         pipe2.chain(map2);
         // prepare the third MultiPipe
@@ -174,7 +180,7 @@ int main(int argc, char *argv[])
                                     .withOutputBatchSize(dist_b(rng))
                                     .withKeyBy([](const tuple_t &t) -> size_t { return t.key; })
                                     .withBoundaries(milliseconds(lower_bound), milliseconds(upper_bound))
-                                    .withKPMode()
+                                    .withHPMode(hybrid_parallelism_degree)
                                     .build();
         pipe3.add(join);
         Filter_Functor filter_functor(2);
@@ -228,10 +234,10 @@ int main(int argc, char *argv[])
         global_sum = 0;
     }
     // executes the runs in DETERMINISTIC mode
-    for (size_t i=0; i<runs; i++) {
+    for (size_t i=0; i<0; i++) {
         map1_degree = dist_p(rng);
         map2_degree = dist_p(rng);
-        join_degree = dist_p(rng);
+        //join_degree = dist_p(rng);
         filter_degree = dist_p(rng);
         sink1_degree = dist_p(rng);
         sink2_degree = dist_p(rng);
@@ -299,7 +305,7 @@ int main(int argc, char *argv[])
                                     .withParallelism(join_degree)
                                     .withKeyBy([](const tuple_t &t) -> size_t { return t.key; })
                                     .withBoundaries(milliseconds(lower_bound), milliseconds(upper_bound))
-                                    .withKPMode()
+                                    .withHPMode(hybrid_parallelism_degree)
                                     .build();
         pipe3.add(join);
         Filter_Functor filter_functor(2);
