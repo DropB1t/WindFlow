@@ -216,7 +216,8 @@ private:
             // we use the Join_Collector if DEFAULT execution mode and DP/HP join mode
             if ((_operator.getType() == "Interval_Join_DP" || _operator.getType() == "Interval_Join_HP") && execution_mode == Execution_Mode_t::DEFAULT) {
                 r->receiveBatches(_needBatching);
-                auto *collector = new Join_Collector<decltype(_operator.getKeyExtractor())>(_operator.getKeyExtractor(), _ordering_mode, execution_mode, Join_Mode_t::DP, id++, _needBatching, separator_id);
+                Join_Mode_t join_mode = _operator.getType() == "Interval_Join_DP" ? Join_Mode_t::DP : Join_Mode_t::HP;
+                auto *collector = new Join_Collector<decltype(_operator.getKeyExtractor())>(_operator.getKeyExtractor(), _ordering_mode, execution_mode, join_mode, id++, _needBatching, separator_id);
                 combine_with_firststage(*stage, collector, true); // combine with the Join_Collector
             }
             else if (_operator.getType() == "Parallel_Windows_WLQ" || _operator.getType() == "Parallel_Windows_REDUCE") { // special cases
