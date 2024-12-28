@@ -575,7 +575,7 @@ public:
                 std::cerr << RED << "WindFlow Error: hybrid parallelism cannot be greater than the parallelism of the Interval Join" << DEFAULT_COLOR << std::endl;
                 exit(EXIT_FAILURE);
             }
-            if (this->hybrid_parallelism == 1) {
+            /* if (this->hybrid_parallelism == 1) {
                 this->joinMode = Join_Mode_t::KP;
                 this->input_routing_mode = Routing_Mode_t::KEYBY;
                 std::cout << YELLOW << "WindFlow Warning: hybrid parallelism is set to 1, the Interval Join will operate in Key-Parallelism mode" << DEFAULT_COLOR << std::endl;
@@ -583,7 +583,7 @@ public:
                 this->joinMode = Join_Mode_t::DP;
                 this->input_routing_mode = Routing_Mode_t::BROADCAST;
                 std::cout << YELLOW << "WindFlow Warning: hybrid parallelism is equal to the parallelism of the Interval Join, the Interval Join will operate in Data-Parallelism mode" << DEFAULT_COLOR << std::endl;
-            }
+            } */
         }
         for (size_t i=0; i<this->parallelism; i++) { // create the internal replicas of the Interval Join
             replicas.push_back(new IJoin_Replica<join_func_t, keyextr_func_t>(this->func, this->key_extr, this->name, RuntimeContext(this->parallelism, i), _closing_func, this->lower_bound, this->upper_bound, this->joinMode, i, this->parallelism, this->hybrid_parallelism));
