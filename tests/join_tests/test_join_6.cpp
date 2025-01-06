@@ -105,12 +105,12 @@ int main(int argc, char *argv[])
     long last_result = 0;
     // executes the runs in DEFAULT mode
     for (size_t i=0; i<runs; i++) {
-        map1_degree = 3; dist_p(rng);
-        map2_degree = 3; dist_p(rng);
+        map1_degree = dist_p(rng);
+        map2_degree = dist_p(rng);
         //join_degree = dist_p(rng);
-        filter_degree = 1; dist_p(rng);
-        sink1_degree = 1; dist_p(rng);
-        sink2_degree = 1; dist_p(rng);
+        filter_degree = dist_p(rng);
+        sink1_degree = dist_p(rng);
+        sink2_degree = dist_p(rng);
         cout << "Run " << i << endl;
         cout << "+---------------------+                                   +-----------+" << endl;
         cout << "|  +-----+   +-----+  |                                   |  +-----+  |" << endl;
@@ -153,7 +153,7 @@ int main(int argc, char *argv[])
         Map map1 = Map_Builder(map_functor1)
                         .withName("map1")
                         .withParallelism(map1_degree)
-                        //.withOutputBatchSize(5)
+                        .withOutputBatchSize(dist_b(rng))
                         .build();
         pipe1.chain(map1);
         // prepare the second MultiPipe
@@ -168,7 +168,7 @@ int main(int argc, char *argv[])
         Map map2 = Map_Builder(map_functor2)
                         .withName("map2")
                         .withParallelism(map2_degree)
-                        //.withOutputBatchSize(5)
+                        .withOutputBatchSize(dist_b(rng))
                         .build();
         pipe2.chain(map2);
         // prepare the third MultiPipe
@@ -234,7 +234,7 @@ int main(int argc, char *argv[])
         global_sum = 0;
     }
     // executes the runs in DETERMINISTIC mode
-    for (size_t i=0; i<0; i++) {
+    for (size_t i=0; i<runs; i++) {
         map1_degree = dist_p(rng);
         map2_degree = dist_p(rng);
         //join_degree = dist_p(rng);
