@@ -67,7 +67,7 @@ int main(int argc, char *argv[])
     global_sum = 0;
     // arguments from command line
     if (argc != 15) {
-        cout << argv[0] << " -r [runs] -l [stream_length] -k [n_keys] -L [lower bound in msec] -U [upper bound in msec]" << endl;
+        cout << argv[0] << " -r [runs] -l [stream_length] -k [n_keys] -L [lower bound in msec] -U [upper bound in msec] -P [join_degree] -H [hybrid_parallelism_degree]" << endl;
         exit(EXIT_SUCCESS);
     }
     while ((option = getopt(argc, argv, "r:l:k:L:U:P:H:")) != -1) {
@@ -87,7 +87,7 @@ int main(int argc, char *argv[])
             case 'H': hybrid_parallelism_degree = atoi(optarg);
                     break;
             default: {
-                cout << argv[0] << " -r [runs] -l [stream_length] -k [n_keys] -L [lower bound in msec] -U [upper bound in msec]" << endl;
+                cout << argv[0] << " -r [runs] -l [stream_length] -k [n_keys] -L [lower bound in msec] -U [upper bound in msec] -P [join_degree] -H [hybrid_parallelism_degree]" << endl;
                 exit(EXIT_SUCCESS);
             }
         }
