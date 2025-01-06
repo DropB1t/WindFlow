@@ -26,14 +26,16 @@
  *  @author  Gabriele Mencagli and Yuriy Rymarchuk
  *  
  *  @brief Collector used for managing input streams received by the Interval Join operator
- *         in data partitioning mode
+ *         in data parallelism and hybrid parallelism modes.
  *  
  *  @section Join_Collector (Description)
  *  
  *  This class implements a FastFlow multi-input node able to receive inputs with
  *  watermarks, and to send them in output by adjusting watermarks and stream tags
- *  for join operators in a correct manner. The collector is used in data partitioning
- *  mode only.
+ *  for join operators in a correct manner. The collector is used in data parallelism
+ *  and hybrid parallelism modes together with Interval Join Operator. In case of hybrid
+ *  parallelism, the collector is able to manage multiple keys and to dispatch tuples
+ *  in a correct order to the join operator (key-based round robin dispatching).
  */ 
 
 #ifndef JOIN_COLLECTOR_H
@@ -56,23 +58,219 @@ class Join_Collector: public ff::ff_minode
 private:
     keyextr_func_t key_extr; // key extractor
     using tuple_t = decltype(get_tuple_t_KeyExtr(key_extr)); // extracting the tuple_t type and checking the admissible singatures
+    using key_t = decltype(get_key_t_KeyExtr(key_extr)); // extracting the key_t type and checking the admissible singatures
+
     bool input_batching; // true if the collector expects to receive batches, false otherwise
     ordering_mode_t ordering_mode; // ordering mode used by the Join_Collector
     Execution_Mode_t execution_mode; // execution mode of the PipeGraph
     Join_Mode_t interval_join_mode; // interval join mode
     size_t id_collector; // identifier of the Join_Collector
     size_t eos_received; // number of received EOS messages
+
     size_t separator_id; // stream separator meaningful to join operators
+    std::vector<size_t> channel_ids; // vector containing the ids of the input channels ordered in a round-robin fashion
     size_t id; // selected channel id to forward the output from
+
+    // Useful attributes for Data Parallelism
+    std::unordered_map<size_t, std::queue<void *>> channelMap; // hash table mapping channel ids onto tuples queues of that channel
     std::vector<bool> enabled; // enable[i] is true if channel i is enabled
     std::vector<uint64_t> maxs; // maxs[i] constains the highest watermark received from the i-th input channel
-    std::vector<size_t> channel_ids; // vector containing the ids of the input channels
     size_t next_id; // next index, for channel_ids vector, which will be used to select the next channel to forward the output from
-    std::unordered_map<size_t, std::queue<void *>> channelMap; // hash table mapping channel ids onto tuples queues of that channel
+
+    // struct of a key dispatcher, useful in Hybrid Parallelism
+    struct Key_Dispatcher
+    {
+        bool input_batching; // true if the collector expects to receive batches, false otherwise
+        size_t id_collector; // identifier of the Join_Collector
+        size_t num_channels; // number of input channels
+
+        size_t next_id; // next index, for channel_ids vector of a specific key, which will be used to select the next channel to forward the output from
+        uint64_t min_ch_wm; // minimum watermark among the enabled channels of a specific key
+        uint64_t min_queue_wm; // minimum watermark among all tuples queues of a specific key
+        bool queues_empty; // true if all the queues of the key dispatcher are empty, false otherwise
+
+        std::vector<std::queue<void *>> key_channelMap; // vector of tuples queues of a specific key for each channel
+        std::vector<uint64_t> ch_maxs; // vector of the highest watermarks received from each channel of a specific key
+        std::vector<bool> ch_enabled; // vector of booleans indicating if a channel is enabled or not
+
+        Key_Dispatcher(size_t _num_channels, bool _input_batching, size_t _id_collector):
+                        input_batching(_input_batching),
+                        id_collector(_id_collector),
+                        num_channels(_num_channels),
+                        min_ch_wm(0),
+                        min_queue_wm(0),
+                        queues_empty(true),
+                        next_id(0),
+                        key_channelMap(_num_channels),
+                        ch_maxs(_num_channels),
+                        ch_enabled(_num_channels) {
+                            for(size_t i=0; i<_num_channels; i++) {
+                                key_channelMap[i] = std::queue<void *>();
+                                ch_maxs[i] = 0;
+                                ch_enabled.push_back(true);
+                            }
+                        }
+
+        template<typename T>
+        uint64_t getWatermark(T *in, size_t id_collector) {
+            return in->getWatermark(id_collector);
+        }
+
+        void push(size_t id, void *tuple)
+        {
+            assert(id < num_channels); // sanity check
+            key_channelMap[id].push(tuple);
+
+            uint64_t new_min_queue_wm = std::numeric_limits<uint64_t>::max();
+            for(size_t i=0; i<num_channels; i++) {
+                if(!key_channelMap[i].empty()) {
+                    uint64_t wm;
+                    if (input_batching) {
+                        wm = getWatermark(reinterpret_cast<Batch_t<tuple_t> *>(key_channelMap[i].front()), id_collector);
+                    } else {
+                        wm = getWatermark(reinterpret_cast<Single_t<tuple_t> *>(key_channelMap[i].front()), id_collector);
+                    }
+                    if (wm < new_min_queue_wm) {
+                        new_min_queue_wm = wm;
+                    }
+                }
+            }
+            if (new_min_queue_wm != std::numeric_limits<uint64_t>::max()) {
+                min_queue_wm = new_min_queue_wm;
+                queues_empty = false;
+            }
+        }
+
+        void pop(size_t id)
+        {
+            assert(id < num_channels); // sanity check
+            uint64_t pop_wm;
+            if (input_batching) {
+                pop_wm = getWatermark(reinterpret_cast<Batch_t<tuple_t> *>(key_channelMap[id].front()), id_collector);
+            } else {
+                pop_wm = getWatermark(reinterpret_cast<Single_t<tuple_t> *>(key_channelMap[id].front()), id_collector);
+            }
+            key_channelMap[id].pop();
+
+            assert(ch_maxs[id] <= pop_wm); // sanity check
+            uint64_t old_max_wm = ch_maxs[id];
+            ch_maxs[id] = pop_wm;
+
+            if (old_max_wm == min_ch_wm) {
+                uint64_t new_min_wm = std::numeric_limits<uint64_t>::max();
+                for(size_t i=0; i<num_channels; i++) {
+                    if (ch_enabled[i] && ch_maxs[i] < new_min_wm) {
+                        new_min_wm = ch_maxs[i];
+                    }
+                }
+                if(new_min_wm != std::numeric_limits<uint64_t>::max()) {
+                    min_ch_wm = new_min_wm;
+                }
+            }
+
+            // if the pop_wm was the minimum watermark among the channel's tuples queue in waiting
+            // to be dispatched: update min_queue_wm by scanning the first element of each channel's queue
+            if (pop_wm == min_queue_wm) {
+                uint64_t new_min_queue_wm = std::numeric_limits<uint64_t>::max();
+                queues_empty = true;
+                for(size_t i=0; i<num_channels; i++) {
+                    if(!key_channelMap[i].empty()) {
+                        uint64_t wm;
+                        if (input_batching) {
+                            wm = getWatermark(reinterpret_cast<Batch_t<tuple_t> *>(key_channelMap[i].front()), id_collector);
+                        } else {
+                            wm = getWatermark(reinterpret_cast<Single_t<tuple_t> *>(key_channelMap[i].front()), id_collector);
+                        }
+                        if (wm < new_min_queue_wm) {
+                            new_min_queue_wm = wm;
+                        }
+                    }
+                }
+                if (new_min_queue_wm != std::numeric_limits<uint64_t>::max()) {
+                    min_queue_wm = new_min_queue_wm;
+                    queues_empty = false;
+                }
+            }
+        }
+
+        void *front(size_t id)
+        {
+            assert(id < num_channels); // sanity check
+            return key_channelMap[id].front();
+        }
+
+        bool empty(size_t id)
+        {
+            assert(id < num_channels); // sanity check
+            return key_channelMap[id].empty();
+        }
+
+        size_t totalQueueSize()
+        {
+            size_t total_size = 0;
+            for(size_t i=0; i<num_channels; i++) {
+                total_size += key_channelMap[i].size();
+            }
+            return total_size;
+        }
+
+        size_t increment_id()
+        {
+            next_id = (next_id + 1) % num_channels;
+            return next_id;
+        }
+
+        size_t get_next_id()
+        {
+            return next_id;
+        }
+
+        uint64_t getMinWM()
+        {
+            if(!queues_empty) {
+                return std::min(min_queue_wm, min_ch_wm);
+            }
+            return min_ch_wm;
+        }
+
+        void disable_channel(size_t id)
+        {
+            assert(id < num_channels); // sanity check
+            uint64_t old_max_wm = ch_maxs[id];
+            ch_enabled[id] = false;
+            if (old_max_wm == min_ch_wm) {
+                uint64_t new_min_wm = std::numeric_limits<uint64_t>::max();
+                for(size_t i=0; i<num_channels; i++) {
+                    if (ch_enabled[i] && ch_maxs[i] < new_min_wm) {
+                        new_min_wm = ch_maxs[i];
+                    }
+                }
+                if(new_min_wm != std::numeric_limits<uint64_t>::max()) {
+                    min_ch_wm = new_min_wm;
+                }
+            }
+        }
+
+    };
+
+    std::unordered_map<key_t, Key_Dispatcher> key_dispatcherMap; // hash table mapping keys onto key dispatchers
 
     // Get the minimum watermark first among the channel's queue of tuples to be dispatched, then among the enabled channels
     uint64_t getMinimumWM()
     {
+        if (interval_join_mode == Join_Mode_t::HP)
+        {
+            uint64_t min_wm = std::numeric_limits<uint64_t>::max();
+            for (auto &k: key_dispatcherMap) {
+                Key_Dispatcher &key_d = (k.second);
+                uint64_t key_min_wm = key_d.getMinWM();
+                if (key_min_wm < min_wm) {
+                    min_wm = key_min_wm;
+                }
+            }
+            return min_wm;
+        }
+        
         uint64_t min_wm;
         bool first = true;
         for (size_t i=0; i<this->get_num_inchannels(); i++) {
@@ -95,7 +293,7 @@ private:
         return min_wm;
     }
 
-    // getMinChannelWM method
+    // getMinChannelWM method (used in Data Parallelism)
     uint64_t getMinChannelWM(size_t id)
     {
         if (!input_batching){
@@ -111,6 +309,11 @@ private:
     inline void setup_tuple(in_t _in, size_t _source_id)
     {
         uint64_t min_wm = getMinimumWM();
+        if(interval_join_mode == Join_Mode_t::HP) {
+            _in->setWatermark(min_wm, id_collector);
+            _in->setStreamTag(_source_id < separator_id ? Join_Stream_t::A : Join_Stream_t::B);
+            return;
+        }
         assert(maxs[_source_id] <= _in->getWatermark(id_collector)); // sanity check
         maxs[_source_id] = _in->getWatermark(id_collector); // watermarks are received ordered on the same input channel
         _in->setWatermark(min_wm, id_collector); // replace the watermark with the right one to use
@@ -186,6 +389,11 @@ public:
     void *svc(void *_in) override
     {
         size_t source_id = this->get_channel_id(); // get the index of the source stream
+        if (interval_join_mode == Join_Mode_t::HP) {
+             dispatch_hp(_in, source_id);
+            return this->GO_ON;
+        }
+        
         if (!input_batching) { // non batching mode
             Single_t<tuple_t> * input = reinterpret_cast<Single_t<tuple_t> *>(_in); // cast the input to a Single_t structure
             id = channel_ids[next_id];
@@ -248,15 +456,126 @@ public:
         }
     }
 
+    void dispatch_hp(void *_in, size_t source_id) {
+        if (!input_batching) {
+            Single_t<tuple_t> *input = reinterpret_cast<Single_t<tuple_t> *>(_in);
+            key_t key = key_extr(input->tuple);
+            if(key_dispatcherMap.find(key) == key_dispatcherMap.end()) {
+                key_dispatcherMap.insert(std::make_pair(key, Key_Dispatcher(this->get_num_inchannels(), input_batching, id_collector)));
+            }
+            auto &key_d = key_dispatcherMap.at(key);
+            id = channel_ids[key_d.get_next_id()];
+            if (source_id != id) {
+                key_d.push(source_id, input);
+                return;
+            }
+            else if (!key_d.empty(id)) {
+                key_d.push(source_id, input);
+                input = reinterpret_cast<Single_t<tuple_t> *>(key_d.front(id));
+                setup_tuple(input, id);
+                key_d.pop(id);
+                this->ff_send_out(input);
+            }
+            else {
+                setup_tuple(input, id);
+                this->ff_send_out(input);
+            }
+            id = channel_ids[key_d.increment_id()];
+            while (!key_d.empty(id)) {
+                input = reinterpret_cast<Single_t<tuple_t> *>(key_d.front(id));
+                setup_tuple(input, id);
+                key_d.pop(id);
+                this->ff_send_out(input);
+                id = channel_ids[key_d.increment_id()];
+            }
+        } else {
+            Batch_t<tuple_t> *batch_input = reinterpret_cast<Batch_t<tuple_t> *>(_in);
+            key_t key = key_extr(batch_input->getTupleAtPos(0));
+            if(key_dispatcherMap.find(key) == key_dispatcherMap.end()) {
+                key_dispatcherMap.insert(std::make_pair(key, Key_Dispatcher(this->get_num_inchannels(), input_batching, id_collector)));
+            }
+            auto &key_d = key_dispatcherMap.at(key);
+            id = channel_ids[key_d.get_next_id()];
+            if (source_id != id) {
+                key_d.push(source_id, batch_input);
+                return;
+            }
+            else if (!key_d.empty(id)) {
+                key_d.push(source_id, batch_input);
+                batch_input = reinterpret_cast<Batch_t<tuple_t> *>(key_d.front(id));
+                setup_tuple(batch_input, id);
+                key_d.pop(id);
+                this->ff_send_out(batch_input);
+            }
+            else {
+                setup_tuple(batch_input, id);
+                this->ff_send_out(batch_input);
+            }
+            id = channel_ids[key_d.increment_id()];
+            while (!key_d.empty(id)) {
+                batch_input = reinterpret_cast<Batch_t<tuple_t> *>(key_d.front(id));
+                setup_tuple(batch_input, id);
+                key_d.pop(id);
+                this->ff_send_out(batch_input);
+                id = channel_ids[key_d.increment_id()];
+            }
+        }
+    }
+
     // method to manage the EOS (utilized by the FastFlow runtime)
     void eosnotify(ssize_t id) override
     {
         assert(id < this->get_num_inchannels()); // sanity check
         eos_received++;
         enabled[id] = false; // disable the channel where we received the EOS
+        if(interval_join_mode == Join_Mode_t::HP) {
+            for (auto &k: key_dispatcherMap) {
+                Key_Dispatcher &key_d = (k.second);
+                key_d.disable_channel(id);
+            }
+        }
         if (eos_received != this->get_num_inchannels()) { // check the number of received EOS messages
             return;
         }
+
+        if(interval_join_mode == Join_Mode_t::HP) {
+            size_t total_size = 0;
+            for (auto &k: key_dispatcherMap) {
+                Key_Dispatcher &key_d = (k.second);
+                total_size += key_d.totalQueueSize();
+            }
+            if (total_size == 0) {
+                return;
+            }
+            while (total_size > 0) {
+                for (auto &k: key_dispatcherMap) {
+                    Key_Dispatcher &key_d = (k.second);
+                    size_t key_total_size = key_d.totalQueueSize();
+                    if (key_total_size == 0)  continue;
+                    while(key_total_size > 0) {
+                        id = channel_ids[key_d.increment_id()];
+                        if (!key_d.empty(id)) {
+                            if (!input_batching) {
+                                Single_t<tuple_t> *out = reinterpret_cast<Single_t<tuple_t> *>(key_d.front(id));
+                                setup_tuple(out, id);
+                                key_d.pop(id);
+                                this->ff_send_out(out);
+                            }
+                            else {
+                                Batch_t<tuple_t> *out = reinterpret_cast<Batch_t<tuple_t> *>(key_d.front(id));
+                                setup_tuple(out, id);
+                                key_d.pop(id);
+                                this->ff_send_out(out);
+                            }
+                            key_total_size--;
+                            total_size--;
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
         size_t total_size = 0;
         for(size_t i=0; i<this->get_num_inchannels(); i++) {
             total_size += channelMap[i].size();
@@ -291,6 +610,12 @@ public:
         for (auto &q: channelMap) { // check that the all the channel queues are empty
             auto &channel_queue = (q.second);
             assert((channel_queue).size() == 0);
+        }
+        for (auto &k: key_dispatcherMap) {
+            Key_Dispatcher &key_d = (k.second);
+            for(size_t i=0; i<key_d.num_channels; i++) {
+                assert(key_d.key_channelMap[i].size() == 0);
+            }
         }
     }
 };
