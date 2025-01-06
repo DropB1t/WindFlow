@@ -60,7 +60,6 @@ private:
     bool useTreeMode; // true if the emitter is used in tree-based mode
     std::vector<std::pair<void *, size_t>> output_queue; // vector of pairs (messages and destination identifiers)
     std::unordered_map<key_t, Batch_CPU_t<tuple_t> *> batches_output; // map of the output batches one per destination channel (meaningful if size > 0)
-    std::vector<uint64_t> last_sent_wms; // vector of the last sent watermarks, one per destination channel
 
 public:
     // Constructor
@@ -72,8 +71,7 @@ public:
                       num_dests(_num_dests),
                       hybrid_degree(_hybrid_degree),
                       size(_size),
-                      useTreeMode(false),
-                      last_sent_wms(_num_dests, 0)  {}
+                      useTreeMode(false) {}
 
     // Copy Constructor
     HybridJoin_Emitter(const HybridJoin_Emitter &_other):
@@ -82,8 +80,7 @@ public:
                       num_dests(_other.num_dests),
                       hybrid_degree(_other.hybrid_degree),
                       size(_other.size),
-                      useTreeMode(_other.useTreeMode),
-                      last_sent_wms(_other.last_sent_wms) {}
+                      useTreeMode(_other.useTreeMode) {}
 
     // Destructor
     ~HybridJoin_Emitter() override
@@ -207,8 +204,6 @@ public:
         size_t i = hashcode % num_dests; // compute the initial destination identifier (master_id)
         size_t sends = hybrid_degree;
         while(sends > 0) {
-            assert(last_sent_wms[i] <= _output->getWatermark(i)); // sanity check
-            last_sent_wms[i] = _output->getWatermark(i); // save the last watermark emitted to this destination
             if (!useTreeMode) { // real send
                 _node->ff_send_out_to(_output, i);
             }
@@ -246,8 +241,6 @@ public:
             size_t i = master_id;
             size_t sends = hybrid_degree;
             while(sends > 0) {
-                assert(last_sent_wms[i] <= (batch->watermarks)[i]); // sanity check
-                last_sent_wms[i] = (batch->watermarks)[i]; // save the last watermark emitted to this destination
                 if (!useTreeMode) { // real send
                     _node->ff_send_out_to(batch, i);
                 }
@@ -318,8 +311,6 @@ public:
                 size_t i = master_id;
                 size_t sends = hybrid_degree;
                 while(sends > 0) {
-                    assert(last_sent_wms[i] <= (batch->watermarks)[i]); // sanity check
-                    last_sent_wms[i] = (batch->watermarks)[i]; // save the last watermark emitted to this destination
                     if (!useTreeMode) { // real send
                         _node->ff_send_out_to(batch, i);
                     }
@@ -329,30 +320,8 @@ public:
                     i = (i+1) % num_dests;
                     sends--;
                 }
-                //batches_output.erase(it); // delete the batch from the map
-                //std::cout << "Erased" << std::endl;
             }
-            batches_output.clear();           
-            /* for (size_t i=0; i<num_dests; i++) {
-                if (batches_output[i] != nullptr) {
-                    assert(batches_output[i]->getSize() > 0); // sanity check
-                    (batches_output[i]->delete_counter).fetch_add(hybrid_degree-1);
-                    (batches_output[i]->watermarks).insert((batches_output[i]->watermarks).end(), num_dests-1, (batches_output[i]->watermarks)[0]); // copy the watermark (having one per destination)
-                    size_t j = i; // master_id
-                    size_t sends = hybrid_degree;
-                    while(sends > 0) {
-                        if (!useTreeMode) { // real send
-                            _node->ff_send_out_to(batches_output[i], j);
-                        }
-                        else { // output is buffered
-                            output_queue.push_back(std::make_pair(batches_output[i], j));
-                        }
-                        j = (j+1) % num_dests;
-                        sends--;
-                    }
-                    batches_output[i] = nullptr;
-                }
-            } */
+            batches_output.clear();
         }
     }
 
