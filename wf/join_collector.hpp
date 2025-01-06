@@ -552,8 +552,8 @@ public:
                     Key_Dispatcher &key_d = (k.second);
                     size_t key_total_size = key_d.totalQueueSize();
                     if (key_total_size == 0)  continue;
+                    id = channel_ids[key_d.get_next_id()];
                     while(key_total_size > 0) {
-                        id = channel_ids[key_d.increment_id()];
                         if (!key_d.empty(id)) {
                             if (!input_batching) {
                                 Single_t<tuple_t> *out = reinterpret_cast<Single_t<tuple_t> *>(key_d.front(id));
@@ -570,6 +570,7 @@ public:
                             key_total_size--;
                             total_size--;
                         }
+                        id = channel_ids[key_d.increment_id()];
                     }
                 }
             }
