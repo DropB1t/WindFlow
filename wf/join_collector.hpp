@@ -107,29 +107,27 @@ private:
                             for(size_t i=0; i<_num_channels; i++) {
                                 key_channelMap[i] = std::queue<void *>();
                                 ch_maxs[i] = 0;
-                                ch_enabled.push_back(true);
+                                ch_enabled[i] = true;
                             }
                         }
 
-        template<typename T>
-        uint64_t getWatermark(T *in, size_t id_collector) {
-            return in->getWatermark(id_collector);
+        uint64_t getQueueWatermark(size_t i) {
+            if (!input_batching) {
+                return reinterpret_cast<Single_t<tuple_t> *>(key_channelMap[i].front())->getWatermark(id_collector);
+            } else {
+                return reinterpret_cast<Batch_t<tuple_t> *>(key_channelMap[i].front())->getWatermark(id_collector);
+            }
         }
 
         void push(size_t id, void *tuple)
         {
             assert(id < num_channels); // sanity check
             key_channelMap[id].push(tuple);
-
+            /* 
             uint64_t new_min_queue_wm = std::numeric_limits<uint64_t>::max();
             for(size_t i=0; i<num_channels; i++) {
                 if(!key_channelMap[i].empty()) {
-                    uint64_t wm;
-                    if (input_batching) {
-                        wm = getWatermark(reinterpret_cast<Batch_t<tuple_t> *>(key_channelMap[i].front()), id_collector);
-                    } else {
-                        wm = getWatermark(reinterpret_cast<Single_t<tuple_t> *>(key_channelMap[i].front()), id_collector);
-                    }
+                    uint64_t wm = getQueueWatermark(i);
                     if (wm < new_min_queue_wm) {
                         new_min_queue_wm = wm;
                     }
@@ -138,24 +136,19 @@ private:
             if (new_min_queue_wm != std::numeric_limits<uint64_t>::max()) {
                 min_queue_wm = new_min_queue_wm;
                 queues_empty = false;
-            }
+            } */
         }
 
         void pop(size_t id)
         {
             assert(id < num_channels); // sanity check
-            uint64_t pop_wm;
-            if (input_batching) {
-                pop_wm = getWatermark(reinterpret_cast<Batch_t<tuple_t> *>(key_channelMap[id].front()), id_collector);
-            } else {
-                pop_wm = getWatermark(reinterpret_cast<Single_t<tuple_t> *>(key_channelMap[id].front()), id_collector);
-            }
+            //uint64_t pop_wm = getQueueWatermark(id);
             key_channelMap[id].pop();
 
-            assert(ch_maxs[id] <= pop_wm); // sanity check
-            uint64_t old_max_wm = ch_maxs[id];
-            ch_maxs[id] = pop_wm;
+            //assert(ch_maxs[id] <= pop_wm); // sanity check
+            //ch_maxs[id] = pop_wm;
 
+            /* uint64_t old_max_wm = ch_maxs[id];
             if (old_max_wm == min_ch_wm) {
                 uint64_t new_min_wm = std::numeric_limits<uint64_t>::max();
                 for(size_t i=0; i<num_channels; i++) {
@@ -190,7 +183,7 @@ private:
                     min_queue_wm = new_min_queue_wm;
                     queues_empty = false;
                 }
-            }
+            } */
         }
 
         void *front(size_t id)
@@ -227,18 +220,45 @@ private:
 
         uint64_t getMinWM()
         {
-            if(!queues_empty) {
+            uint64_t min_wm;
+            bool first = true;
+            for (size_t i=0; i<num_channels; i++) {
+                if (!key_channelMap[i].empty() && first) {
+                    min_wm = getQueueWatermark(i);
+                    first = false;
+                }
+                else if (ch_enabled[i] && first) {
+                    min_wm = ch_maxs[i];
+                    first = false;
+                }
+                else if (!key_channelMap[i].empty() && (getQueueWatermark(i) < min_wm)) {
+                    min_wm = getQueueWatermark(i);
+                }
+                else if (ch_enabled[i] && (ch_maxs[i] < min_wm)) {
+                    min_wm = ch_maxs[i];
+                }
+            }
+            assert(first == false); // sanity check
+            return min_wm;
+            /* if(!queues_empty) {
                 return std::min(min_queue_wm, min_ch_wm);
             }
-            return min_ch_wm;
+            return min_ch_wm; */
+        }
+
+        void update_ch_maxs(size_t id, uint64_t wm)
+        {
+            assert(id < num_channels); // sanity check
+            assert(ch_maxs[id] <= wm); // sanity check
+            ch_maxs[id] = wm;
         }
 
         void disable_channel(size_t id)
         {
             assert(id < num_channels); // sanity check
-            uint64_t old_max_wm = ch_maxs[id];
+            //uint64_t old_max_wm = ch_maxs[id];
             ch_enabled[id] = false;
-            if (old_max_wm == min_ch_wm) {
+            /* if (old_max_wm == min_ch_wm) {
                 uint64_t new_min_wm = std::numeric_limits<uint64_t>::max();
                 for(size_t i=0; i<num_channels; i++) {
                     if (ch_enabled[i] && ch_maxs[i] < new_min_wm) {
@@ -248,7 +268,7 @@ private:
                 if(new_min_wm != std::numeric_limits<uint64_t>::max()) {
                     min_ch_wm = new_min_wm;
                 }
-            }
+            } */
         }
 
     };
@@ -268,6 +288,7 @@ private:
                     min_wm = key_min_wm;
                 }
             }
+            assert(min_wm != std::numeric_limits<uint64_t>::max());
             return min_wm;
         }
         
@@ -304,19 +325,23 @@ private:
         }
     }
 
-    // setup_table method
     template<typename in_t>
     inline void setup_tuple(in_t _in, size_t _source_id)
     {
         uint64_t min_wm = getMinimumWM();
-        if(interval_join_mode == Join_Mode_t::HP) {
-            _in->setWatermark(min_wm, id_collector);
-            _in->setStreamTag(_source_id < separator_id ? Join_Stream_t::A : Join_Stream_t::B);
-            return;
-        }
         assert(maxs[_source_id] <= _in->getWatermark(id_collector)); // sanity check
         maxs[_source_id] = _in->getWatermark(id_collector); // watermarks are received ordered on the same input channel
         _in->setWatermark(min_wm, id_collector); // replace the watermark with the right one to use
+        _in->setStreamTag(_source_id < separator_id ? Join_Stream_t::A : Join_Stream_t::B);
+    }
+
+    template<typename in_t>
+    inline void hybrid_setup_tuple(Key_Dispatcher &key_d, in_t _in, size_t _source_id)
+    {
+        uint64_t min_wm = getMinimumWM();
+        uint64_t wm = _in->getWatermark(id_collector);
+        key_d.update_ch_maxs(_source_id, wm);
+        _in->setWatermark(min_wm, id_collector);
         _in->setStreamTag(_source_id < separator_id ? Join_Stream_t::A : Join_Stream_t::B);
     }
 
@@ -472,18 +497,18 @@ public:
             else if (!key_d.empty(id)) {
                 key_d.push(source_id, input);
                 input = reinterpret_cast<Single_t<tuple_t> *>(key_d.front(id));
-                setup_tuple(input, id);
+                hybrid_setup_tuple(key_d, input, id);
                 key_d.pop(id);
                 this->ff_send_out(input);
             }
             else {
-                setup_tuple(input, id);
+                hybrid_setup_tuple(key_d, input, id);
                 this->ff_send_out(input);
             }
             id = channel_ids[key_d.increment_id()];
             while (!key_d.empty(id)) {
                 input = reinterpret_cast<Single_t<tuple_t> *>(key_d.front(id));
-                setup_tuple(input, id);
+                hybrid_setup_tuple(key_d, input, id);
                 key_d.pop(id);
                 this->ff_send_out(input);
                 id = channel_ids[key_d.increment_id()];
@@ -503,18 +528,18 @@ public:
             else if (!key_d.empty(id)) {
                 key_d.push(source_id, batch_input);
                 batch_input = reinterpret_cast<Batch_t<tuple_t> *>(key_d.front(id));
-                setup_tuple(batch_input, id);
+                hybrid_setup_tuple(key_d, batch_input, id);
                 key_d.pop(id);
                 this->ff_send_out(batch_input);
             }
             else {
-                setup_tuple(batch_input, id);
+                hybrid_setup_tuple(key_d, batch_input, id);
                 this->ff_send_out(batch_input);
             }
             id = channel_ids[key_d.increment_id()];
             while (!key_d.empty(id)) {
                 batch_input = reinterpret_cast<Batch_t<tuple_t> *>(key_d.front(id));
-                setup_tuple(batch_input, id);
+                hybrid_setup_tuple(key_d, batch_input, id);
                 key_d.pop(id);
                 this->ff_send_out(batch_input);
                 id = channel_ids[key_d.increment_id()];
@@ -548,8 +573,8 @@ public:
                 return;
             }
             while (total_size > 0) {
-                for (auto &k: key_dispatcherMap) {
-                    Key_Dispatcher &key_d = (k.second);
+                for (auto it = key_dispatcherMap.begin(); it != key_dispatcherMap.end(); ) {
+                    Key_Dispatcher &key_d = (it->second);
                     size_t key_total_size = key_d.totalQueueSize();
                     if (key_total_size == 0)  continue;
                     id = channel_ids[key_d.get_next_id()];
@@ -557,13 +582,13 @@ public:
                         if (!key_d.empty(id)) {
                             if (!input_batching) {
                                 Single_t<tuple_t> *out = reinterpret_cast<Single_t<tuple_t> *>(key_d.front(id));
-                                setup_tuple(out, id);
+                                hybrid_setup_tuple(key_d, out, id);
                                 key_d.pop(id);
                                 this->ff_send_out(out);
                             }
                             else {
                                 Batch_t<tuple_t> *out = reinterpret_cast<Batch_t<tuple_t> *>(key_d.front(id));
-                                setup_tuple(out, id);
+                                hybrid_setup_tuple(key_d, out, id);
                                 key_d.pop(id);
                                 this->ff_send_out(out);
                             }
@@ -572,6 +597,7 @@ public:
                         }
                         id = channel_ids[key_d.increment_id()];
                     }
+                    it = key_dispatcherMap.erase(it);
                 }
             }
             return;
