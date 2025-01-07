@@ -389,9 +389,9 @@ public:
             return 0.0;
         double acc = 0;
         uint64_t n_key = 0;
-        for (auto &k: keyMap) {
-            Key_Descriptor &key_d = (k.second);
-            auto mean_size = (key_d.archive_metrics).getArchiveMeanSize();
+        for (const auto &k: keyMap) {
+            const Key_Descriptor &key_d = k.second;
+            auto mean_size = key_d.archive_metrics.getArchiveMeanSize();
             acc += mean_size;
             n_key++;
         }
