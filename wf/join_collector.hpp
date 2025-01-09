@@ -576,7 +576,10 @@ public:
                 for (auto it = key_dispatcherMap.begin(); it != key_dispatcherMap.end(); ) {
                     Key_Dispatcher &key_d = (it->second);
                     size_t key_total_size = key_d.totalQueueSize();
-                    if (key_total_size == 0)  continue;
+                    if (key_total_size == 0) {
+                        ++it;
+                        continue;
+                    }
                     id = channel_ids[key_d.get_next_id()];
                     while(key_total_size > 0) {
                         if (!key_d.empty(id)) {
