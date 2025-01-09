@@ -338,7 +338,7 @@ private:
     template<typename in_t>
     inline void hybrid_setup_tuple(Key_Dispatcher &key_d, in_t _in, size_t _source_id)
     {
-        uint64_t min_wm = getMinimumWM();
+        uint64_t min_wm = key_d.getMinWM();
         uint64_t wm = _in->getWatermark(id_collector);
         key_d.update_ch_maxs(_source_id, wm);
         _in->setWatermark(min_wm, id_collector);

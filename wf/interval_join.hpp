@@ -126,15 +126,32 @@ private:
     };
 
     compare_func_t compare_func; // function to compare wrapper to an uint64 that rapresents a timestamp or a watermark
+    size_t ignored_tuples; // number of ignored tuples
     int64_t lower_bound; // lower bound of the interval (ts - lower_bound)
     int64_t upper_bound; // upper bound of the interval (ts + upper_bound)
     Join_Mode_t joinMode; // Interval Join operating mode
     std::unordered_map<key_t, Key_Descriptor> keyMap; // hash table that maps a descriptor for each key
-    uint64_t last_time; // last received watermark or timestamp
-    size_t ignored_tuples; // number of ignored tuples
+
+    uint64_t last_wm; // last received watermark or timestamp
+    std::unordered_map<key_t, uint64_t> last_wms; // last watermark received for each key, used in Hybrid Parallelism
+    
     size_t id_inner; // id_inner value
     size_t num_inner; // num_inner value
     size_t hybrid_degree; // hybrid degree of the emitter in case of hybrid parallelism
+
+    // Checks if the given Join_Stream_t is Stream A
+    bool isStreamA(Join_Stream_t stream) const
+    {
+        return stream == Join_Stream_t::A;
+    }
+
+    // Inserts a wrapper object into the buffer of a given key descriptor
+    void insertIntoBuffer(Key_Descriptor &_key_d,
+                          wrapper_t _wt,
+                          Join_Stream_t stream)
+    {
+        isStreamA(stream) ? (_key_d.archiveA).insert(_wt) : (_key_d.archiveB).insert(_wt);
+    }
 
     // Calculates the FNV-1a hash value for the given key
     const size_t fnv1a_hash(const void* key,
@@ -151,20 +168,6 @@ private:
         return hash;
     }
 
-    // Checks if the given Join_Stream_t is Stream A
-    bool isStreamA(Join_Stream_t stream) const
-    {
-        return stream == Join_Stream_t::A;
-    }
-
-    // Inserts a wrapper object into the buffer of a given key descriptor
-    void insertIntoBuffer(Key_Descriptor &_key_d,
-                          wrapper_t _wt,
-                          Join_Stream_t stream)
-    {
-        isStreamA(stream) ? (_key_d.archiveA).insert(_wt) : (_key_d.archiveB).insert(_wt);
-    }
-
     size_t computeHashIndex(const tuple_t &_tuple, const uint64_t &_timestamp)
     {
         size_t hash;
@@ -178,7 +181,7 @@ private:
     size_t computeHashIndex(const key_t &key, const tuple_t &_tuple, const uint64_t &_timestamp)
     {
         size_t hash;
-        size_t hybrid_offset std::hash<key_t>()(key) % hybrid_degree;
+        size_t hybrid_offset = std::hash<key_t>()(key) % hybrid_degree;
         if constexpr(if_defined_hash<tuple_t>)
             hash = std::hash<tuple_t>()(_tuple);
         else
@@ -187,11 +190,11 @@ private:
     }
 
     // Purges the archives of the given key descriptor
-    void purgeArchives(Key_Descriptor &_key_d)
+    void purgeArchives(Key_Descriptor &_key_d, uint64_t check_point)
     {
         uint64_t idx_a = 0, idx_b = 0;
-        if ((upper_bound) <= static_cast<int64_t>(last_time))  { idx_a = last_time - upper_bound; }
-        if (-(lower_bound) <= static_cast<int64_t>(last_time)) { idx_b = last_time + lower_bound; }
+        if ((upper_bound) <= static_cast<int64_t>(check_point))  { idx_a = check_point - upper_bound; }
+        if (-(lower_bound) <= static_cast<int64_t>(check_point)) { idx_b = check_point + lower_bound; }
         (_key_d.archiveA).purge(idx_a);
         (_key_d.archiveB).purge(idx_b);
     }
@@ -201,7 +204,8 @@ private:
     {
         for (auto &k: keyMap) {
             Key_Descriptor &key_d = (k.second);
-            purgeArchives(key_d);
+            uint64_t wm = joinMode == Join_Mode_t::HP ? last_wms[k.first] : last_wm;
+            purgeArchives(key_d, wm);
         }
     }
 
@@ -225,7 +229,7 @@ public:
                   lower_bound(_lower_bound),
                   upper_bound(_upper_bound),
                   joinMode(_join_mode),
-                  last_time(0),
+                  last_wm(0),
                   ignored_tuples(0),
                   id_inner(_id_inner),
                   num_inner(_num_inner),
@@ -246,7 +250,7 @@ public:
                   lower_bound(_other.lower_bound),
                   upper_bound(_other.upper_bound),
                   joinMode(_other.joinMode),
-                  last_time(_other.last_time),
+                  last_wm(_other.last_wm),
                   ignored_tuples(_other.ignored_tuples),
                   id_inner(_other.id_inner),
                   num_inner(_other.num_inner),
@@ -260,8 +264,15 @@ public:
             Batch_t<tuple_t> *batch_input = reinterpret_cast<Batch_t<tuple_t> *>(_in);
             if (batch_input->isPunct()) { // if it is a punctuaton
                 (this->emitter)->propagate_punctuation(batch_input->getWatermark((this->context).getReplicaIndex()), this); // propagate the received punctuation
-                assert(last_time <= batch_input->getWatermark((this->context).getReplicaIndex())); // sanity check
-                last_time = batch_input->getWatermark((this->context).getReplicaIndex());
+                if (joinMode == Join_Mode_t::HP) {
+                    key_t key = key_extr(batch_input->getTupleAtPos(0)); // get the key attribute of the punctuation
+                    assert(last_wms.find(key) != last_wms.end()); // sanity check
+                    assert(last_wms[key] <= batch_input->getWatermark((this->context).getReplicaIndex())); // sanity check
+                    last_wms[key] = batch_input->getWatermark((this->context).getReplicaIndex());
+                } else {
+                    assert(last_wm <= batch_input->getWatermark((this->context).getReplicaIndex())); // sanity check
+                    last_wm = batch_input->getWatermark((this->context).getReplicaIndex());
+                }
                 purgeWithPunct();
                 deleteBatch_t(batch_input); // delete the punctuation
                 return this->GO_ON;
@@ -279,8 +290,15 @@ public:
             Single_t<tuple_t> *input = reinterpret_cast<Single_t<tuple_t> *>(_in);
             if (input->isPunct()) { // if it is a punctuaton
                 (this->emitter)->propagate_punctuation(input->getWatermark((this->context).getReplicaIndex()), this); // propagate the received punctuation
-                assert(last_time <= input->getWatermark((this->context).getReplicaIndex())); // sanity check
-                last_time = input->getWatermark((this->context).getReplicaIndex());
+                if (joinMode == Join_Mode_t::HP) {
+                    key_t key = key_extr(input->tuple); // get the key attribute of the punctuation
+                    assert(last_wms.find(key) != last_wms.end()); // sanity check
+                    assert(last_wms[key] <= input->getWatermark((this->context).getReplicaIndex())); // sanity check
+                    last_wms[key] = input->getWatermark((this->context).getReplicaIndex());
+                } else {
+                    assert(last_wm <= input->getWatermark((this->context).getReplicaIndex())); // sanity check
+                    last_wm = input->getWatermark((this->context).getReplicaIndex());
+                }
                 purgeWithPunct();
                 deleteSingle_t(input); // delete the punctuation
                 return this->GO_ON;
@@ -302,7 +320,7 @@ public:
                        uint64_t _watermark,
                        Join_Stream_t _tag)
     {
-        if (this->execution_mode == Execution_Mode_t::DEFAULT && _timestamp < last_time) { // if the input is out-of-order
+        if (this->execution_mode == Execution_Mode_t::DEFAULT && joinMode != Join_Mode_t::HP && _timestamp < last_wm) { // if the input is out-of-order
 #if defined (WF_TRACING_ENABLED)
             stats_record.inputs_ignored++;
 #endif
@@ -314,6 +332,14 @@ public:
         if (it == keyMap.end()) {
             auto p = keyMap.insert(std::make_pair(key, Key_Descriptor(compare_func))); // create the state of the key
             it = p.first;
+            last_wms[key] = 0;
+        }
+        if (this->execution_mode == Execution_Mode_t::DEFAULT && joinMode == Join_Mode_t::HP && _timestamp < last_wms[key]) { // if the input is out-of-order
+#if defined (WF_TRACING_ENABLED)
+            stats_record.inputs_ignored++;
+#endif
+            ignored_tuples++;
+            return;
         }
         Key_Descriptor &key_d = (*it).second;
         uint64_t l_b = 0;
@@ -344,7 +370,13 @@ public:
             if (output) {
                 // use the highest timestamp between two joined tuples
                 uint64_t ts = (_timestamp >= interval.index_at(i)) ? _timestamp : interval.index_at(i);
-                this->doEmit(this->emitter, &(*output), 0, ts, _watermark, this);
+                uint64_t wm = _watermark;
+                if (joinMode == Join_Mode_t::HP) {
+                    wm = std::min_element(last_wms.begin(), last_wms.end(), [](const auto &p1, const auto &p2) {
+                        return p1.second < p2.second;
+                    })->second;
+                }
+                this->doEmit(this->emitter, &(*output), 0, ts, wm, this);
 #if defined (WF_TRACING_ENABLED)
                 (this->stats_record).outputs_sent++;
                 (this->stats_record).bytes_sent += sizeof(result_t);
@@ -365,16 +397,22 @@ public:
                 insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
             }
         }
-        if (this->execution_mode == Execution_Mode_t::DEFAULT) {
-            assert(last_time <= _watermark); // sanity check
-            if (last_time < _watermark)
-                purgeArchives(key_d); // purge the archives using the new watermark
-            last_time = _watermark;
+
+        if (this->execution_mode == Execution_Mode_t::DEFAULT && joinMode == Join_Mode_t::HP){
+            assert(last_wms[key] <= _watermark); // sanity check
+            if (last_wms[key] < _watermark)
+                purgeArchives(key_d, _watermark); // purge the archives using the new watermark
+            last_wms[key] = _watermark;
+        } else if (this->execution_mode == Execution_Mode_t::DEFAULT) {
+            assert(last_wm <= _watermark); // sanity check
+            if (last_wm < _watermark)
+                purgeArchives(key_d, _watermark); // purge the archives using the new watermark
+            last_wm = _watermark;
         }
         else {
-            if (last_time < _timestamp) {
-                purgeArchives(key_d); // purge the archives using the new watermark
-                last_time = _timestamp;
+            if (last_wm < _timestamp) {
+                purgeArchives(key_d, _timestamp); // purge the archives using the new watermark
+                last_wm = _timestamp;
             }
         }
     }
