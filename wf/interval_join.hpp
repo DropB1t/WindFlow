@@ -169,6 +169,27 @@ private:
         isStreamA(stream) ? (_key_d.archiveA).insert(_wt) : (_key_d.archiveB).insert(_wt);
     }
 
+    size_t computeHashIndex(const tuple_t &_tuple, const uint64_t &_timestamp)
+    {
+        size_t hash;
+        if constexpr(if_defined_hash<tuple_t>)
+            hash = std::hash<tuple_t>()(_tuple);
+        else
+            hash = fnv1a_hash(&_timestamp);
+        return hash % num_inner;
+    }
+
+    size_t computeHashIndex(const key_t &key, const tuple_t &_tuple, const uint64_t &_timestamp)
+    {
+        size_t hash;
+        size_t hybrid_offset std::hash<key_t>()(key) % hybrid_degree;
+        if constexpr(if_defined_hash<tuple_t>)
+            hash = std::hash<tuple_t>()(_tuple);
+        else
+            hash = fnv1a_hash(&_timestamp);
+        return (hash % hybrid_degree) + hybrid_offset;
+    }
+
     // Purges the archives of the given key descriptor
     void purgeArchives(Key_Descriptor &_key_d)
     {
@@ -338,24 +359,14 @@ public:
             insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
         }
         else if (joinMode == Join_Mode_t::DP || joinMode == Join_Mode_t::HP) {
-            size_t hash, hash_idx;
-            size_t hybrid_offset = std::hash<key_t>()(key) % num_inner;
-
-            if constexpr(if_defined_hash<tuple_t>) {
-                // compute the hash index of the tuple given a defined hash function specialization for the tuple_t
-                hash = std::hash<tuple_t>()(_tuple);
-                hash_idx = joinMode == Join_Mode_t::DP ? (hash % num_inner) : (((hash % hybrid_degree) + hybrid_offset) % num_inner);
-                if (hash_idx == id_inner) {
-                    insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
-                }
-            }
-            else {
-                // compute the hash index of the tuple using FNV-1a hash function using the timestamp
-                hash = fnv1a_hash(&_timestamp);
-                hash_idx = joinMode == Join_Mode_t::DP ? (hash % num_inner) : (((hash % hybrid_degree) + hybrid_offset) % num_inner);
-                if (hash_idx == id_inner) {
-                    insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
-                }
+            size_t hash_id;
+            if (joinMode == Join_Mode_t::DP)
+                hash_id = computeHashIndex(_tuple, _timestamp);
+            else
+                hash_id = computeHashIndex(key, _tuple, _timestamp);
+            
+            if (hash_id == id_inner) {
+                insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
             }
         }
         if (this->execution_mode == Execution_Mode_t::DEFAULT) {
