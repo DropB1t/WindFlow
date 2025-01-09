@@ -181,12 +181,12 @@ private:
     size_t computeHashIndex(const key_t &key, const tuple_t &_tuple, const uint64_t &_timestamp)
     {
         size_t hash;
-        size_t hybrid_offset = std::hash<key_t>()(key) % hybrid_degree;
+        size_t id_offset = std::hash<key_t>()(key) % num_inner;
         if constexpr(if_defined_hash<tuple_t>)
             hash = std::hash<tuple_t>()(_tuple);
         else
             hash = fnv1a_hash(&_timestamp);
-        return (hash % hybrid_degree) + hybrid_offset;
+        return ((hash % hybrid_degree) + id_offset) % num_inner;
     }
 
     // Purges the archives of the given key descriptor
@@ -408,8 +408,7 @@ public:
             if (last_wm < _watermark)
                 purgeArchives(key_d, _watermark); // purge the archives using the new watermark
             last_wm = _watermark;
-        }
-        else {
+        } else {
             if (last_wm < _timestamp) {
                 purgeArchives(key_d, _timestamp); // purge the archives using the new watermark
                 last_wm = _timestamp;
