@@ -138,6 +138,7 @@ private:
     size_t id_inner; // id_inner value
     size_t num_inner; // num_inner value
     size_t hybrid_degree; // hybrid degree of the emitter in case of hybrid parallelism
+    std::unordered_map<key_t, std::vector<int>> keyToJoiners; // mapping keys to replicas
 
     // Checks if the given Join_Stream_t is Stream A
     bool isStreamA(Join_Stream_t stream) const
@@ -168,24 +169,32 @@ private:
         return hash;
     }
 
-    size_t computeHashIndex(const tuple_t &_tuple, const uint64_t &_timestamp)
+    size_t computeHashIndex(const tuple_t &_tuple,
+                            const uint64_t &_timestamp,
+                            size_t N)
     {
         size_t hash;
-        if constexpr(if_defined_hash<tuple_t>)
+        if constexpr(if_defined_hash<tuple_t>) {
             hash = std::hash<tuple_t>()(_tuple);
-        else
+        }
+        else {
             hash = fnv1a_hash(&_timestamp);
-        return hash % num_inner;
+        }
+        return hash % N;
     }
 
-    size_t computeHashIndex(const key_t &key, const tuple_t &_tuple, const uint64_t &_timestamp)
+    size_t computeHashIndex(const key_t &key,
+                            const tuple_t &_tuple,
+                            const uint64_t &_timestamp)
     {
         size_t hash;
         size_t id_offset = std::hash<key_t>()(key) % num_inner;
-        if constexpr(if_defined_hash<tuple_t>)
+        if constexpr(if_defined_hash<tuple_t>) {
             hash = std::hash<tuple_t>()(_tuple);
-        else
+        }
+        else {
             hash = fnv1a_hash(&_timestamp);
+        }
         return ((hash % hybrid_degree) + id_offset) % num_inner;
     }
 
@@ -221,7 +230,8 @@ public:
                   Join_Mode_t _join_mode,
                   size_t _id_inner,
                   size_t _num_inner,
-                  size_t _hybrid_degree):
+                  size_t _hybrid_degree,
+                  std::unordered_map<key_t, std::vector<int>> _keyToJoiners):
                   Basic_Replica(_opName, _context, _closing_func, false),
                   func(_func),
                   key_extr(_key_extr),
@@ -233,7 +243,8 @@ public:
                   ignored_tuples(0),
                   id_inner(_id_inner),
                   num_inner(_num_inner),
-                  hybrid_degree(_hybrid_degree)
+                  hybrid_degree(_hybrid_degree),
+                  keyToJoiners(_keyToJoiners)
     {
         compare_func = [](const wrapper_t &w1, const uint64_t &_idx) { // comparator function of wrapped tuples
             return w1.index < _idx;
@@ -254,7 +265,8 @@ public:
                   ignored_tuples(_other.ignored_tuples),
                   id_inner(_other.id_inner),
                   num_inner(_other.num_inner),
-                  hybrid_degree(_other.hybrid_degree) {}
+                  hybrid_degree(_other.hybrid_degree),
+                  keyToJoiners(_other.keyToJoiners) {}
 
     // svc (utilized by the FastFlow runtime)
     void *svc(void *_in) override
@@ -388,11 +400,16 @@ public:
         }
         else if (joinMode == Join_Mode_t::DP || joinMode == Join_Mode_t::HP) {
             size_t hash_id;
-            if (joinMode == Join_Mode_t::DP)
-                hash_id = computeHashIndex(_tuple, _timestamp);
-            else
+            if (joinMode == Join_Mode_t::DP) { // DP
+                hash_id = computeHashIndex(_tuple, _timestamp, num_inner);
+            }
+            else if (keyToJoiners.size() == 0) { // HP (Version I)
                 hash_id = computeHashIndex(key, _tuple, _timestamp);
-            
+            }
+            else { // HP (Version II)
+                int pos = computeHashIndex(_tuple, _timestamp, keyToJoiners[key].size());
+                hash_id = keyToJoiners[key][pos];
+            }
             if (hash_id == id_inner) {
                 insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
             }
@@ -465,10 +482,13 @@ private:
     int64_t lower_bound; // lower bound of the interval, can be negative (ts + lower_bound)
     int64_t upper_bound; // upper bound of the interval, can be negative (ts + upper_bound)
     Join_Mode_t joinMode; // Interval Join operating mode
-    size_t hybrid_parallelism; // parallelism of the hybrid partitioning mode
+    using key_t = decltype(get_key_t_KeyExtr(key_extr)); // extracting the key_t type and checking the admissible signatures
     using tuple_t = decltype(get_tuple_t_Join(func)); // extracting the tuple_t type and checking the admissible signatures
     using result_t = decltype(get_result_t_Join(func)); // extracting the result_t type and checking the admissible signatures
     static constexpr op_type_t op_type = op_type_t::BASIC;
+
+    size_t hybrid_parallelism; // parallelism of the hybrid partitioning mode
+    std::unordered_map<key_t, std::vector<int>> keyToJoiners; // mapping keys to replicas
 
     // Configure the Interval Join to receive batches instead of individual inputs
     void receiveBatches(bool _input_batching) override
@@ -515,9 +535,16 @@ private:
         return key_extr;
     }
 
-    size_t getHybridParallelism() const
+    // Get the hybrid parallelism degree
+    size_t getHybridParallelism() const override
     {
         return hybrid_parallelism;
+    }
+
+    // Get a pointer to the map between keys and replicas
+    void *getKeysToJoiner() const override
+    {
+        return (void *) &keyToJoiners;
     }
 
 #if defined (WF_TRACING_ENABLED)
@@ -583,6 +610,7 @@ public:
      *  \param _upper_bound upper bound of the interval (ts - upper_bound)
      *  \param _join_mode Interval Join operating mode
      *  \param _hybrid_parallelism parallelism of the hybrid partitioning mode
+     *  \param _keyToJoiners reference to a mapping between keys and replicas
      */ 
     Interval_Join(join_func_t _func,
                   keyextr_func_t _key_extr,
@@ -594,32 +622,36 @@ public:
                   int64_t _lower_bound,
                   int64_t _upper_bound,
                   Join_Mode_t _join_mode,
-                  size_t _hybrid_parallelism):
+                  size_t _hybrid_parallelism,
+                  const std::unordered_map<key_t, std::vector<int>> &_keyToJoiners):
                   Basic_Operator(_parallelism, _name, _input_routing_mode, _outputBatchSize),
                   func(_func),
                   key_extr(_key_extr),
                   lower_bound(_lower_bound),
                   upper_bound(_upper_bound),
                   joinMode(_join_mode),
-                  hybrid_parallelism(_hybrid_parallelism)
+                  hybrid_parallelism(_hybrid_parallelism),
+                  keyToJoiners(_keyToJoiners)
     {
         if (this->joinMode == Join_Mode_t::HP) {
             if (this->hybrid_parallelism > this->parallelism) {
                 std::cerr << RED << "WindFlow Error: hybrid parallelism cannot be greater than the parallelism of the Interval Join" << DEFAULT_COLOR << std::endl;
                 exit(EXIT_FAILURE);
             }
-            /* if (this->hybrid_parallelism == 1) {
-                this->joinMode = Join_Mode_t::KP;
-                this->input_routing_mode = Routing_Mode_t::KEYBY;
-                std::cout << YELLOW << "WindFlow Warning: hybrid parallelism is set to 1, the Interval Join will operate in Key-Parallelism mode" << DEFAULT_COLOR << std::endl;
-            } else if (this->hybrid_parallelism == this->parallelism) {
-                this->joinMode = Join_Mode_t::DP;
-                this->input_routing_mode = Routing_Mode_t::BROADCAST;
-                std::cout << YELLOW << "WindFlow Warning: hybrid parallelism is equal to the parallelism of the Interval Join, the Interval Join will operate in Data-Parallelism mode" << DEFAULT_COLOR << std::endl;
-            } */
         }
         for (size_t i=0; i<this->parallelism; i++) { // create the internal replicas of the Interval Join
-            replicas.push_back(new IJoin_Replica<join_func_t, keyextr_func_t>(this->func, this->key_extr, this->name, RuntimeContext(this->parallelism, i), _closing_func, this->lower_bound, this->upper_bound, this->joinMode, i, this->parallelism, this->hybrid_parallelism));
+            replicas.push_back(new IJoin_Replica<join_func_t, keyextr_func_t>(this->func,
+                                                                              this->key_extr,
+                                                                              this->name,
+                                                                              RuntimeContext(this->parallelism, i),
+                                                                              _closing_func,
+                                                                              this->lower_bound,
+                                                                              this->upper_bound,
+                                                                              this->joinMode,
+                                                                              i,
+                                                                              this->parallelism,
+                                                                              this->hybrid_parallelism,
+                                                                              keyToJoiners));
         }
     }
 
@@ -631,7 +663,8 @@ public:
                   lower_bound(_other.lower_bound),
                   upper_bound(_other.upper_bound),
                   joinMode(_other.joinMode),
-                  hybrid_parallelism(_other.hybrid_parallelism)
+                  hybrid_parallelism(_other.hybrid_parallelism),
+                  keyToJoiners(_other.keyToJoiners)
     {
         for (size_t i=0; i<this->parallelism; i++) { // deep copy of the pointers to the Interval Join replicas
             replicas.push_back(new IJoin_Replica<join_func_t, keyextr_func_t>(*(_other.replicas[i])));

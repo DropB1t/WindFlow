@@ -375,9 +375,28 @@ public:
         return isGpuOP;
     }
 
+    /** 
+     *  \brief Get the hybrid parallelism degree (not a good interface)
+     *  \return hybrid parallelism degree
+     */ 
     virtual size_t getHybridParallelism() const
     {
         return 0;
+    }
+
+    /** 
+     *  \brief // Get a pointer to the map between keys and replicas  (not a good interface)
+     *  \return map keys to replicas
+     */ 
+    virtual void* getKeysToJoiner() const
+    {
+        return nullptr;
+    }
+
+    template<typename key_t>
+    std::unordered_map<key_t, std::unordered_set<int>> getKeyToJoiners() const
+    {
+        return std::unordered_map<key_t, std::unordered_set<int>>();
     }
 
     Basic_Operator(Basic_Operator &&) = delete; ///< Move constructor is deleted
