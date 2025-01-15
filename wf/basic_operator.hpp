@@ -393,12 +393,6 @@ public:
         return nullptr;
     }
 
-    template<typename key_t>
-    std::unordered_map<key_t, std::unordered_set<int>> getKeyToJoiners() const
-    {
-        return std::unordered_map<key_t, std::unordered_set<int>>();
-    }
-
     Basic_Operator(Basic_Operator &&) = delete; ///< Move constructor is deleted
     Basic_Operator &operator=(const Basic_Operator &) = delete; ///< Copy assignment operator is deleted
     Basic_Operator &operator=(Basic_Operator &&) = delete; ///< Move assignment operator is deleted
