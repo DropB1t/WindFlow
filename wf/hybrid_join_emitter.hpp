@@ -29,10 +29,10 @@
  *  
  *  @section HybridJoin_Emitter (Description)
  *  
- *  The emitter delivers each received tuple to M destinations (without copies), where M is equal
- *  to hybrid parallelism degree.
- *  The emitter can be configured to work without batching (using Single_t structures)
- *  or in batched mode (using Batch_CPU_t structures).
+ *  The emitter delivers each received tuple to a set of destinations (without copies),
+ *  where M is equal to hybrid parallelism degree. The emitter can be configured to
+ *  work without batching (using Single_t structures) or in batched mode (using
+ *  Batch_CPU_t structures).
  */ 
 
 #ifndef HJ_EMITTER_H
@@ -198,6 +198,16 @@ public:
     // Routing method
     void routing(Single_t<tuple_t> *_output, ff::ff_monode *_node)
     {
+<<<<<<< HEAD
+        if (keysToJoiner->size() == 0) { // hybrid version I
+            (_output->delete_counter).fetch_add(hybrid_degree-1);
+            assert((_output->fields).size() == 3); // sanity check
+            (_output->fields).insert((_output->fields).end(), num_dests-1, (_output->fields)[2]); // copy the watermark (having one per destination)
+            auto key = key_extr(_output->tuple); // extract the key attribute
+            size_t hashcode = std::hash<key_t>()(key); // compute the hashcode of the key
+            size_t master_id = hashcode % num_dests; // compute the initial destination identifier (master_id)
+            size_t i = master_id;
+=======
         assert((_output->fields).size() == 3); // sanity check
         (_output->fields).insert((_output->fields).end(), num_dests-1, (_output->fields)[2]); // copy the watermark (having one per destination)
         auto key = key_extr(_output->tuple); // extract the key attribute
@@ -206,6 +216,7 @@ public:
             (_output->delete_counter).fetch_add(hybrid_degree-1);
             size_t hashkey = std::hash<key_t>()(key); // compute the hashcode of the key
             size_t i = hashkey % num_dests; // compute the initial destination identifier (master_id)
+>>>>>>> ce7efac673e52c3a11bf823890ba7479608b408c
             size_t sends = hybrid_degree;
             while(sends > 0) {
                 if (!useTreeMode) { // real send
@@ -216,6 +227,24 @@ public:
                 }
                 i = (i+1) % num_dests;
                 sends--;
+<<<<<<< HEAD
+            }
+        }
+        else { // hybrid version II
+            auto key = key_extr(_output->tuple); // extract the key attribute
+            assert(keysToJoiner->find(key) != keysToJoiner->end()); // sanity check
+            (_output->delete_counter).fetch_add((*keysToJoiner)[key].size()-1);
+            assert((_output->fields).size() == 3); // sanity check
+            (_output->fields).insert((_output->fields).end(), num_dests-1, (_output->fields)[2]); // copy the watermark (having one per destination)    
+            for (auto i: (*keysToJoiner)[key]) {
+                if (!useTreeMode) { // real send
+                    _node->ff_send_out_to(_output, i);
+                }
+                else { // output is buffered
+                    output_queue.push_back(std::make_pair(_output, i));
+                }
+            }           
+=======
             }
         } else {
             assert(keysToJoiner->find(key) != keysToJoiner->end()); // sanity check
@@ -230,6 +259,7 @@ public:
                     output_queue.push_back(std::make_pair(_output, i));
                 }
             }
+>>>>>>> ce7efac673e52c3a11bf823890ba7479608b408c
         }
     }
 
@@ -247,15 +277,21 @@ public:
         }
         Batch_CPU_t<tuple_t> *batch = (*it).second;
         batch->addTuple(std::move(_tuple), _timestamp, _watermark);
-        
         if (batch->getSize() == size) { // batch is ready to be sent
             assert((batch->watermarks).size() == 1); // sanity check
             // copy the watermark (having one per destination)
             (batch->watermarks).insert((batch->watermarks).end(), num_dests-1, (batch->watermarks)[0]);
+<<<<<<< HEAD
+            if (keysToJoiner->size() == 0) { // hybrid version I
+                (batch->delete_counter).fetch_add(hybrid_degree-1);
+                size_t hashcode = std::hash<key_t>()(key); // compute the hashcode of the key
+                size_t master_id = hashcode % num_dests; // compute the initial destination identifier (master_id)
+=======
             if (keysToJoiner->size() == 0) {
                 (batch->delete_counter).fetch_add(hybrid_degree-1);
                 size_t hashkey = std::hash<key_t>()(key); // compute the hashcode of the key
                 size_t master_id = hashkey % num_dests; // compute the initial destination identifier (master_id)
+>>>>>>> ce7efac673e52c3a11bf823890ba7479608b408c
                 size_t i = master_id;
                 size_t sends = hybrid_degree;
                 while(sends > 0) {
@@ -268,7 +304,13 @@ public:
                     i = (i+1) % num_dests;
                     sends--;
                 }
+<<<<<<< HEAD
+                batches_output.erase(it); // delete the batch from the map
+            }
+            else { // hybrid version II
+=======
             } else {
+>>>>>>> ce7efac673e52c3a11bf823890ba7479608b408c
                 assert(keysToJoiner->find(key) != keysToJoiner->end()); // sanity check
                 (batch->delete_counter).fetch_add((*keysToJoiner)[key].size()-1);
                 for (auto i: (*keysToJoiner)[key]) {
@@ -279,8 +321,11 @@ public:
                         output_queue.push_back(std::make_pair(batch, i));
                     }
                 }
+<<<<<<< HEAD
+                batches_output.erase(it); // delete the batch from the map              
+=======
+>>>>>>> ce7efac673e52c3a11bf823890ba7479608b408c
             }
-            batches_output.erase(it); // delete the batch from the map
         }
     }
 
@@ -331,6 +376,14 @@ public:
                 key_t key = it->first;
                 Batch_CPU_t<tuple_t> *batch = it->second;
                 assert((batch->watermarks).size() == 1); // sanity check
+<<<<<<< HEAD
+                if (keysToJoiner->size() == 0) { // hybrid version I
+                    size_t hashcode = std::hash<key_t>()(key); // compute the hashcode of the key
+                    size_t master_id = hashcode % num_dests; // compute the initial destination identifier (master_id)
+                    // copy the watermark (having one per destination)
+                    (batch->watermarks).insert((batch->watermarks).end(), num_dests-1, (batch->watermarks)[0]);
+                    (batch->delete_counter).fetch_add(hybrid_degree-1);
+=======
                 // copy the watermark (having one per destination)
                 (batch->watermarks).insert((batch->watermarks).end(), num_dests-1, (batch->watermarks)[0]);
 
@@ -338,6 +391,7 @@ public:
                     (batch->delete_counter).fetch_add(hybrid_degree-1);
                     size_t hashkey = std::hash<key_t>()(key); // compute the hashcode of the key
                     size_t master_id = hashkey % num_dests; // compute the initial destination identifier (master_id)
+>>>>>>> ce7efac673e52c3a11bf823890ba7479608b408c
                     size_t i = master_id;
                     size_t sends = hybrid_degree;
                     while(sends > 0) {
@@ -349,6 +403,23 @@ public:
                         }
                         i = (i+1) % num_dests;
                         sends--;
+<<<<<<< HEAD
+                    }
+                }
+                else { // hybrid version II
+                    assert(keysToJoiner->find(key) != keysToJoiner->end()); // sanity check
+                    // copy the watermark (having one per destination)
+                    (batch->watermarks).insert((batch->watermarks).end(), num_dests-1, (batch->watermarks)[0]);
+                    (batch->delete_counter).fetch_add((*keysToJoiner)[key].size()-1);
+                    for (auto i: (*keysToJoiner)[key]) {
+                        if (!useTreeMode) { // real send
+                            _node->ff_send_out_to(batch, i);
+                        }
+                        else { // batch_output is buffered
+                            output_queue.push_back(std::make_pair(batch, i));
+                        }
+                    }
+=======
                     }
                 } else { // hybrid version II
                     assert(keysToJoiner->find(key) != keysToJoiner->end()); // sanity check
@@ -362,6 +433,7 @@ public:
                             output_queue.push_back(std::make_pair(batch, i));
                         }
                     }    
+>>>>>>> ce7efac673e52c3a11bf823890ba7479608b408c
                 }
             }
             batches_output.clear();

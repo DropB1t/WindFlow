@@ -38,6 +38,7 @@
 /// includes
 #include<chrono>
 #include<functional>
+#include<unordered_set>
 #include<meta.hpp>
 #if defined (__CUDACC__)
     #include<meta_gpu.hpp>

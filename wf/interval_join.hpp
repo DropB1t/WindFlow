@@ -77,6 +77,7 @@ private:
     using container_t = typename std::deque<wrapper_t>; // container type for underlying archive's buffer structure
     using iterator_t = typename container_t::iterator; // iterator type for accessing wrapped tuples in the archive
     using compare_func_t = std::function<bool(const wrapper_t &, const uint64_t &)>; // function type to compare wrapped tuple to an uint64
+    std::unordered_map<key_t, std::vector<int>> keyToJoiners; // mapping keys to replicas
 
     struct Archive_Stats // structure to store statistics about an archive
     {
@@ -131,10 +132,8 @@ private:
     int64_t upper_bound; // upper bound of the interval (ts + upper_bound)
     Join_Mode_t joinMode; // Interval Join operating mode
     std::unordered_map<key_t, Key_Descriptor> keyMap; // hash table that maps a descriptor for each key
-
     uint64_t last_wm; // last received watermark or timestamp
     std::unordered_map<key_t, uint64_t> last_wms; // last watermark received for each key, used in Hybrid Parallelism
-    
     size_t id_inner; // id_inner value
     size_t num_inner; // num_inner value
     size_t hybrid_degree; // hybrid degree of the emitter in case of hybrid parallelism
@@ -395,37 +394,83 @@ public:
 #endif
             }
         }
-        if (joinMode == Join_Mode_t::KP) {
+#if 1
+        if (joinMode == Join_Mode_t::KP) { // KP
+            insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
+        }
+        else { // DP or HP
+            key_d.partitioning_counter++;
+            if (joinMode == Join_Mode_t::DP) { // DP
+                if (key_d.partitioning_counter % num_inner == id_inner) {
+                    insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
+                }
+            }
+            else { // HP
+                if (keyToJoiners.size() == 0) { // HP (Version I)
+                    size_t hash_id = computeHashIndex(key, _tuple, _timestamp);
+                    if (hash_id == id_inner) {
+                        insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
+                    }
+                }
+                else { // HP (Version II)
+                    if (keyToJoiners[key][key_d.partitioning_counter % keyToJoiners[key].size()] == id_inner) {
+                        insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
+                    }
+                }
+            }
+        }
+#else
+        if (joinMode == Join_Mode_t::KP) { // KP
             insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
         }
         else if (joinMode == Join_Mode_t::DP || joinMode == Join_Mode_t::HP) {
             size_t hash_id;
             if (joinMode == Join_Mode_t::DP) { // DP
                 hash_id = computeHashIndex(_tuple, _timestamp, num_inner);
+<<<<<<< HEAD
+                if (hash_id == id_inner) {
+                    insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
+                }                
             }
             else if (keyToJoiners.size() == 0) { // HP (Version I)
                 hash_id = computeHashIndex(key, _tuple, _timestamp);
+                if (hash_id == id_inner) {
+                    insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
+                } 
+=======
+            }
+            else if (keyToJoiners.size() == 0) { // HP (Version I)
+                hash_id = computeHashIndex(key, _tuple, _timestamp);
+>>>>>>> ce7efac673e52c3a11bf823890ba7479608b408c
             }
             else { // HP (Version II)
                 int pos = computeHashIndex(_tuple, _timestamp, keyToJoiners[key].size());
                 hash_id = keyToJoiners[key][pos];
+<<<<<<< HEAD
+                if (hash_id == id_inner) {
+                    insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
+                } 
+=======
             }
             if (hash_id == id_inner) {
                 insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
+>>>>>>> ce7efac673e52c3a11bf823890ba7479608b408c
             }
         }
-
+#endif
         if (this->execution_mode == Execution_Mode_t::DEFAULT && joinMode == Join_Mode_t::HP){
             assert(last_wms[key] <= _watermark); // sanity check
             if (last_wms[key] < _watermark)
                 purgeArchives(key_d, _watermark); // purge the archives using the new watermark
             last_wms[key] = _watermark;
-        } else if (this->execution_mode == Execution_Mode_t::DEFAULT) {
+        }
+        else if (this->execution_mode == Execution_Mode_t::DEFAULT) {
             assert(last_wm <= _watermark); // sanity check
             if (last_wm < _watermark)
                 purgeArchives(key_d, _watermark); // purge the archives using the new watermark
             last_wm = _watermark;
-        } else {
+        }
+        else {
             if (last_wm < _timestamp) {
                 purgeArchives(key_d, _timestamp); // purge the archives using the new watermark
                 last_wm = _timestamp;
@@ -485,6 +530,8 @@ private:
     using key_t = decltype(get_key_t_KeyExtr(key_extr)); // extracting the key_t type and checking the admissible signatures
     using tuple_t = decltype(get_tuple_t_Join(func)); // extracting the tuple_t type and checking the admissible signatures
     using result_t = decltype(get_result_t_Join(func)); // extracting the result_t type and checking the admissible signatures
+    using key_t = decltype(get_key_t_KeyExtr(key_extr)); // extracting the key_t type and checking the admissible singatures
+    std::unordered_map<key_t, std::vector<int>> keyToJoiners; // mapping keys to replicas
     static constexpr op_type_t op_type = op_type_t::BASIC;
 
     size_t hybrid_parallelism; // parallelism of the hybrid partitioning mode

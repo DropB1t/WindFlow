@@ -312,6 +312,7 @@ private:
         else if (isSourceGPU && !isDestGPU) { // GPU -> CPU case
             if (routing_mode == Routing_Mode_t::FORWARD) { // FW
                 return new Forward_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
+<<<<<<< HEAD
             }
             else if (routing_mode == Routing_Mode_t::REBALANCING) { // RB
                 return new Forward_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
@@ -322,6 +323,18 @@ private:
             else if (routing_mode == Routing_Mode_t::BROADCAST) { // BD
                 return new Broadcast_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
             }
+=======
+            }
+            else if (routing_mode == Routing_Mode_t::REBALANCING) { // RB
+                return new Forward_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
+            }
+            else if (routing_mode == Routing_Mode_t::KEYBY) { // KB
+                return new KeyBy_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
+            }
+            else if (routing_mode == Routing_Mode_t::BROADCAST) { // BD
+                return new Broadcast_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
+            }
+>>>>>>> ce7efac673e52c3a11bf823890ba7479608b408c
             else if (routing_mode == Routing_Mode_t::HYBRID_JOIN) { // HJ
                 abort();
             }
@@ -349,6 +362,7 @@ private:
         else { // CPU -> GPU case
             if (routing_mode == Routing_Mode_t::FORWARD) { // FW
                 return new Forward_Emitter_GPU<decltype(key_extr), false, true>(key_extr, num_dests, _outputBatchSize);
+<<<<<<< HEAD
             }
             else if (routing_mode == Routing_Mode_t::REBALANCING) { // RB
                 return new Forward_Emitter_GPU<decltype(key_extr), false, true>(key_extr, num_dests, _outputBatchSize);
@@ -356,6 +370,15 @@ private:
             else if (routing_mode == Routing_Mode_t::KEYBY) { // KB
                 return new KeyBy_Emitter_GPU<decltype(key_extr), false, true>(key_extr, num_dests, _outputBatchSize);
             }
+=======
+            }
+            else if (routing_mode == Routing_Mode_t::REBALANCING) { // RB
+                return new Forward_Emitter_GPU<decltype(key_extr), false, true>(key_extr, num_dests, _outputBatchSize);
+            }
+            else if (routing_mode == Routing_Mode_t::KEYBY) { // KB
+                return new KeyBy_Emitter_GPU<decltype(key_extr), false, true>(key_extr, num_dests, _outputBatchSize);
+            }
+>>>>>>> ce7efac673e52c3a11bf823890ba7479608b408c
             else if (routing_mode == Routing_Mode_t::HYBRID_JOIN) { // HJ
                 abort();
             }
@@ -428,7 +451,7 @@ private:
     }
 
     // Add an operator to the MultiPipe
-    template<typename operator_t, bool isDestGPUType=false>
+    template<typename operator_t>
     void add_operator(operator_t &_operator, ordering_mode_t _ordering_mode)
     {
         if (!has_source) { // check the Source presence
@@ -539,7 +562,7 @@ private:
     }
 
     // Try to chain an operator with the previous one in the MultiPipe (it is added otherwise)
-    template<typename operator_t, bool isDestGPUType=false>
+    template<typename operator_t>
     bool chain_operator(operator_t &_operator, ordering_mode_t _ordering_mode)
     {
         if (!has_source) { // check the Source presence
@@ -559,11 +582,11 @@ private:
             exit(EXIT_FAILURE);
         }
         if (fromSplitting && last == nullptr) { // corner case -> first operator after splitting can never be chained
-            add_operator<operator_t, isDestGPUType>(_operator, _ordering_mode);
+            add_operator<operator_t>(_operator, _ordering_mode);
             return false;
         }
         if (fromMerging && localOpList.size() == 0) { // corner case -> first operator after merging can never be chained
-            add_operator<operator_t, isDestGPUType>(_operator, _ordering_mode);
+            add_operator<operator_t>(_operator, _ordering_mode);
             return false;
         }
         assert(localOpList.size() > 0); // sanity check
@@ -589,7 +612,7 @@ private:
             return true;
         }
         else {
-            add_operator<operator_t, isDestGPUType>(_operator, _ordering_mode);
+            add_operator<operator_t>(_operator, _ordering_mode);
             return false;
         }
     }
@@ -976,7 +999,7 @@ public:
             auto *copied_op = new op_t(_op); // create a copy of the operator
             copied_op->setExecutionMode(execution_mode);
             checkInputType(*copied_op);
-            add_operator<decltype(*copied_op), true>(*copied_op, ordering_mode_t::TS);
+            add_operator<decltype(*copied_op)>(*copied_op, ordering_mode_t::TS);
             localOpList.push_back(copied_op);
             globalOpList->push_back(copied_op);
 #if defined (WF_TRACING_ENABLED)
@@ -1023,7 +1046,7 @@ public:
             auto *copied_op = new op_t(_op);
             copied_op->setExecutionMode(execution_mode);
             checkInputType(*copied_op);
-            add_operator<decltype(*copied_op), true>(*copied_op, ordering_mode_t::TS);
+            add_operator<decltype(*copied_op)>(*copied_op, ordering_mode_t::TS);
             localOpList.push_back(copied_op);
             globalOpList->push_back(copied_op);
 #if defined (WF_TRACING_ENABLED)
@@ -1086,7 +1109,7 @@ public:
             auto *copied_op = new op_t(_op); // create a copy of the operator
             copied_op->setExecutionMode(execution_mode);
             checkInputType(*copied_op);
-            bool isChained = chain_operator<decltype(*copied_op), true>(*copied_op, ordering_mode_t::TS); // try to chain the operator (otherwise, it is added)
+            bool isChained = chain_operator<decltype(*copied_op)>(*copied_op, ordering_mode_t::TS); // try to chain the operator (otherwise, it is added)
             localOpList.push_back(copied_op);
             globalOpList->push_back(copied_op);
 #if defined (WF_TRACING_ENABLED)
