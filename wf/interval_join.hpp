@@ -427,34 +427,16 @@ public:
             size_t hash_id;
             if (joinMode == Join_Mode_t::DP) { // DP
                 hash_id = computeHashIndex(_tuple, _timestamp, num_inner);
-<<<<<<< HEAD
-                if (hash_id == id_inner) {
-                    insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
-                }                
             }
             else if (keyToJoiners.size() == 0) { // HP (Version I)
                 hash_id = computeHashIndex(key, _tuple, _timestamp);
-                if (hash_id == id_inner) {
-                    insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
-                } 
-=======
-            }
-            else if (keyToJoiners.size() == 0) { // HP (Version I)
-                hash_id = computeHashIndex(key, _tuple, _timestamp);
->>>>>>> ce7efac673e52c3a11bf823890ba7479608b408c
             }
             else { // HP (Version II)
                 int pos = computeHashIndex(_tuple, _timestamp, keyToJoiners[key].size());
                 hash_id = keyToJoiners[key][pos];
-<<<<<<< HEAD
-                if (hash_id == id_inner) {
-                    insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
-                } 
-=======
             }
             if (hash_id == id_inner) {
                 insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
->>>>>>> ce7efac673e52c3a11bf823890ba7479608b408c
             }
         }
 #endif

@@ -312,7 +312,6 @@ private:
         else if (isSourceGPU && !isDestGPU) { // GPU -> CPU case
             if (routing_mode == Routing_Mode_t::FORWARD) { // FW
                 return new Forward_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
-<<<<<<< HEAD
             }
             else if (routing_mode == Routing_Mode_t::REBALANCING) { // RB
                 return new Forward_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
@@ -323,18 +322,6 @@ private:
             else if (routing_mode == Routing_Mode_t::BROADCAST) { // BD
                 return new Broadcast_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
             }
-=======
-            }
-            else if (routing_mode == Routing_Mode_t::REBALANCING) { // RB
-                return new Forward_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
-            }
-            else if (routing_mode == Routing_Mode_t::KEYBY) { // KB
-                return new KeyBy_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
-            }
-            else if (routing_mode == Routing_Mode_t::BROADCAST) { // BD
-                return new Broadcast_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
-            }
->>>>>>> ce7efac673e52c3a11bf823890ba7479608b408c
             else if (routing_mode == Routing_Mode_t::HYBRID_JOIN) { // HJ
                 abort();
             }
@@ -362,7 +349,6 @@ private:
         else { // CPU -> GPU case
             if (routing_mode == Routing_Mode_t::FORWARD) { // FW
                 return new Forward_Emitter_GPU<decltype(key_extr), false, true>(key_extr, num_dests, _outputBatchSize);
-<<<<<<< HEAD
             }
             else if (routing_mode == Routing_Mode_t::REBALANCING) { // RB
                 return new Forward_Emitter_GPU<decltype(key_extr), false, true>(key_extr, num_dests, _outputBatchSize);
@@ -370,15 +356,6 @@ private:
             else if (routing_mode == Routing_Mode_t::KEYBY) { // KB
                 return new KeyBy_Emitter_GPU<decltype(key_extr), false, true>(key_extr, num_dests, _outputBatchSize);
             }
-=======
-            }
-            else if (routing_mode == Routing_Mode_t::REBALANCING) { // RB
-                return new Forward_Emitter_GPU<decltype(key_extr), false, true>(key_extr, num_dests, _outputBatchSize);
-            }
-            else if (routing_mode == Routing_Mode_t::KEYBY) { // KB
-                return new KeyBy_Emitter_GPU<decltype(key_extr), false, true>(key_extr, num_dests, _outputBatchSize);
-            }
->>>>>>> ce7efac673e52c3a11bf823890ba7479608b408c
             else if (routing_mode == Routing_Mode_t::HYBRID_JOIN) { // HJ
                 abort();
             }
