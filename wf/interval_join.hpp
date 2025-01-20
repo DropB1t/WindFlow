@@ -77,7 +77,6 @@ private:
     using container_t = typename std::deque<wrapper_t>; // container type for underlying archive's buffer structure
     using iterator_t = typename container_t::iterator; // iterator type for accessing wrapped tuples in the archive
     using compare_func_t = std::function<bool(const wrapper_t &, const uint64_t &)>; // function type to compare wrapped tuple to an uint64
-    std::unordered_map<key_t, std::vector<int>> keyToJoiners; // mapping keys to replicas
 
     struct Archive_Stats // structure to store statistics about an archive
     {
@@ -509,11 +508,9 @@ private:
     int64_t lower_bound; // lower bound of the interval, can be negative (ts + lower_bound)
     int64_t upper_bound; // upper bound of the interval, can be negative (ts + upper_bound)
     Join_Mode_t joinMode; // Interval Join operating mode
-    using key_t = decltype(get_key_t_KeyExtr(key_extr)); // extracting the key_t type and checking the admissible signatures
     using tuple_t = decltype(get_tuple_t_Join(func)); // extracting the tuple_t type and checking the admissible signatures
     using result_t = decltype(get_result_t_Join(func)); // extracting the result_t type and checking the admissible signatures
     using key_t = decltype(get_key_t_KeyExtr(key_extr)); // extracting the key_t type and checking the admissible singatures
-    std::unordered_map<key_t, std::vector<int>> keyToJoiners; // mapping keys to replicas
     static constexpr op_type_t op_type = op_type_t::BASIC;
 
     size_t hybrid_parallelism; // parallelism of the hybrid partitioning mode
