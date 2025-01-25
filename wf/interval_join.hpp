@@ -159,7 +159,7 @@ private:
         const char* data = (char *)key;
         const size_t prime = 0x1000193;
         size_t hash = 0x811c9dc5;
-        for(int i = 0; i<len; i++) {
+        for (int i = 0; i<len; i++) {
             uint8_t value = data[i];
             hash = hash ^ value;
             hash *= prime;
@@ -167,6 +167,7 @@ private:
         return hash;
     }
 
+    // Compute hash of tuple
     size_t computeHashIndex(const tuple_t &_tuple,
                             const uint64_t &_timestamp,
                             size_t N)
@@ -181,6 +182,7 @@ private:
         return hash % N;
     }
 
+    // Compute hash of a key
     size_t computeHashIndex(const key_t &key,
                             const tuple_t &_tuple,
                             const uint64_t &_timestamp)
@@ -512,7 +514,6 @@ private:
     using result_t = decltype(get_result_t_Join(func)); // extracting the result_t type and checking the admissible signatures
     using key_t = decltype(get_key_t_KeyExtr(key_extr)); // extracting the key_t type and checking the admissible singatures
     static constexpr op_type_t op_type = op_type_t::BASIC;
-
     size_t hybrid_parallelism; // parallelism of the hybrid partitioning mode
     std::unordered_map<key_t, std::vector<int>> keyToJoiners; // mapping keys to replicas
 

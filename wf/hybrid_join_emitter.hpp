@@ -201,7 +201,6 @@ public:
         assert((_output->fields).size() == 3); // sanity check
         (_output->fields).insert((_output->fields).end(), num_dests-1, (_output->fields)[2]); // copy the watermark (having one per destination)
         auto key = key_extr(_output->tuple); // extract the key attribute
-
         if (keysToJoiner->size() == 0) { // hybrid version I
             (_output->delete_counter).fetch_add(hybrid_degree-1);
             size_t hashkey = std::hash<key_t>()(key); // compute the hashcode of the key
@@ -217,7 +216,8 @@ public:
                 i = (i+1) % num_dests;
                 sends--;
             }
-        } else {
+        }
+        else { // hybrid version II
             assert(keysToJoiner->find(key) != keysToJoiner->end()); // sanity check
             (_output->delete_counter).fetch_add((*keysToJoiner)[key].size()-1);
             assert((_output->fields).size() == 3); // sanity check
@@ -251,7 +251,7 @@ public:
             assert((batch->watermarks).size() == 1); // sanity check
             // copy the watermark (having one per destination)
             (batch->watermarks).insert((batch->watermarks).end(), num_dests-1, (batch->watermarks)[0]);
-            if (keysToJoiner->size() == 0) {
+            if (keysToJoiner->size() == 0) { // hybrid version I
                 (batch->delete_counter).fetch_add(hybrid_degree-1);
                 size_t hashkey = std::hash<key_t>()(key); // compute the hashcode of the key
                 size_t master_id = hashkey % num_dests; // compute the initial destination identifier (master_id)
@@ -267,7 +267,9 @@ public:
                     i = (i+1) % num_dests;
                     sends--;
                 }
-            } else {
+                batches_output.erase(it); // delete the batch from the map
+            }
+            else { // hybrid version II
                 assert(keysToJoiner->find(key) != keysToJoiner->end()); // sanity check
                 (batch->delete_counter).fetch_add((*keysToJoiner)[key].size()-1);
                 for (auto i: (*keysToJoiner)[key]) {
@@ -278,6 +280,7 @@ public:
                         output_queue.push_back(std::make_pair(batch, i));
                     }
                 }
+                batches_output.erase(it); // delete the batch from the map
             }
         }
     }
@@ -285,40 +288,7 @@ public:
     // Punctuation propagation method
     void propagate_punctuation(uint64_t _watermark, ff::ff_monode *_node) override
     {
-        if (size == 0) { // no batching
-            tuple_t t; // create an empty tuple (default constructor needed!)
-            Single_t<tuple_t> *punc = allocateSingle_t(std::move(t), 0, 0, _watermark, this->queue);
-            (punc->delete_counter).fetch_add(num_dests-1);
-            assert((punc->fields).size() == 3); // sanity check
-            (punc->fields).insert((punc->fields).end(), num_dests-1, (punc->fields)[2]); // copy the watermark (having one per destination)
-            punc->isPunctuation = true;
-            for (size_t i=0; i<num_dests; i++) {
-                if (!useTreeMode) { // real send
-                    _node->ff_send_out_to(punc, i);
-                }
-                else { // punctuation is buffered
-                    output_queue.push_back(std::make_pair(punc, i));
-                }
-            }
-        }
-        else { // batching
-            flush(_node); // flush the internal partially filled batch (if any)
-            tuple_t t; // create an empty tuple (default constructor needed!)
-            Batch_CPU_t<tuple_t> *punc = allocateBatch_CPU_t<tuple_t>(size, this->queue);
-            punc->addTuple(std::move(t), 0, _watermark);
-            (punc->delete_counter).fetch_add(num_dests-1);
-            assert((punc->watermarks).size() == 1); // sanity check
-            (punc->watermarks).insert((punc->watermarks).end(), num_dests-1, (punc->watermarks)[0]); // copy the watermark (having one per destination)
-            punc->isPunctuation = true;
-            for (size_t i=0; i<num_dests; i++) {
-                if (!useTreeMode) { // real send
-                    _node->ff_send_out_to(punc, i);
-                }
-                else { // punctuation is buffered
-                    output_queue.push_back(std::make_pair(punc, i));
-                }
-            }
-        }
+        abort(); // not supported at the moment
     }
 
     // Flushing method
@@ -331,7 +301,6 @@ public:
                 assert((batch->watermarks).size() == 1); // sanity check
                 // copy the watermark (having one per destination)
                 (batch->watermarks).insert((batch->watermarks).end(), num_dests-1, (batch->watermarks)[0]);
-
                 if (keysToJoiner->size() == 0) { // hybrid version I
                     (batch->delete_counter).fetch_add(hybrid_degree-1);
                     size_t hashkey = std::hash<key_t>()(key); // compute the hashcode of the key
@@ -348,7 +317,8 @@ public:
                         i = (i+1) % num_dests;
                         sends--;
                     }
-                } else { // hybrid version II
+                }
+                else { // hybrid version II
                     assert(keysToJoiner->find(key) != keysToJoiner->end()); // sanity check
                     // copy the watermark (having one per destination)
                     (batch->delete_counter).fetch_add((*keysToJoiner)[key].size()-1);

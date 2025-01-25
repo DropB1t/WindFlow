@@ -1537,7 +1537,7 @@ public:
     }
 
     /** 
-     *  \brief Set Hyrbid Partitioning mode.
+     *  \brief Set Hyrbid Partitioning mode (version I).
      *  
      *  \return a reference to the builder object
      */ 
@@ -1558,7 +1558,7 @@ public:
     }
 
     /** 
-     *  \brief Set Hyrbid Partitioning mode.
+     *  \brief Set Hyrbid Partitioning mode (version II).
      *  
      *  \return a reference to the builder object
      */ 
