@@ -355,7 +355,7 @@ public:
     {
         size_t source_id = this->get_channel_id(); // get the index of the source stream
         if (interval_join_mode == Join_Mode_t::HP) {
-             dispatch_hp(_in, source_id);
+            dispatch_hp(_in, source_id);
             return this->GO_ON;
         }
         if (!input_batching) { // non batching mode
