@@ -228,8 +228,6 @@ public:
                   int64_t _lower_bound,
                   int64_t _upper_bound,
                   Join_Mode_t _join_mode,
-                  size_t _id_inner,
-                  size_t _num_inner,
                   size_t _hybrid_degree,
                   std::unordered_map<key_t, std::vector<int>> _keyToJoiners):
                   Basic_Replica(_opName, _context, _closing_func, false),
@@ -241,14 +239,14 @@ public:
                   joinMode(_join_mode),
                   last_wm(0),
                   ignored_tuples(0),
-                  id_inner(_id_inner),
-                  num_inner(_num_inner),
                   hybrid_degree(_hybrid_degree),
                   keyToJoiners(_keyToJoiners)
     {
         compare_func = [](const wrapper_t &w1, const uint64_t &_idx) { // comparator function of wrapped tuples
             return w1.index < _idx;
         };
+        num_inner = _context.getParallelism();
+        id_inner = _context.getReplicaIndex();
     }
 
     // Copy Constructor
@@ -675,8 +673,6 @@ public:
                                                                               this->lower_bound,
                                                                               this->upper_bound,
                                                                               this->joinMode,
-                                                                              i,
-                                                                              this->parallelism,
                                                                               this->hybrid_parallelism,
                                                                               keyToJoiners));
         }
