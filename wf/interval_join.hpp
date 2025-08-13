@@ -182,7 +182,7 @@ private:
         return hash % N;
     }
 
-    // Compute hash of a key
+    // Compute index by using key and tuple hash (HP Version I)
     size_t computeHashIndex(const key_t &key,
                             const tuple_t &_tuple,
                             const uint64_t &_timestamp)
@@ -196,6 +196,13 @@ private:
             hash = fnv1a_hash(&_timestamp);
         }
         return ((hash % hybrid_degree) + id_offset) % num_inner;
+    }
+
+    // Compute index by using key hash and partitioning_counter ( Alternative HP Version I)
+    size_t computeHashIndex(const key_t &key, uint64_t partitioning_counter)
+    {
+        size_t id_offset = std::hash<key_t>()(key) % num_inner;
+        return ((partitioning_counter % hybrid_degree) + id_offset) % num_inner;
     }
 
     // Purges the archives of the given key descriptor
@@ -406,7 +413,7 @@ public:
             }
             else { // HP
                 if (keyToJoiners.size() == 0) { // HP (Version I)
-                    size_t hash_id = computeHashIndex(key, _tuple, _timestamp);
+                    size_t hash_id = computeHashIndex(key, key_d.partitioning_counter);
                     if (hash_id == id_inner) {
                         insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
                     }
