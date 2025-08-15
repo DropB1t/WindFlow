@@ -38,6 +38,7 @@
 /// includes
 #include<chrono>
 #include<functional>
+#include<unordered_set>
 #include<meta.hpp>
 #if defined (__CUDACC__)
     #include<meta_gpu.hpp>
@@ -1420,6 +1421,8 @@ private:
     int64_t lower_bound=0; // lower bound of the interval
     int64_t upper_bound=0; // upper bound of the interval
     Join_Mode_t join_mode = Join_Mode_t::NONE;
+    size_t hybrid_parallelism = 1; // parallelism of the hybrid partitioning mode
+    std::unordered_map<key_t, std::vector<int>> keyToJoiners; // mapping keys to replicas (used in hybrid mode only)
 
 public:
     /** 
@@ -1467,6 +1470,7 @@ public:
         new_builder.upper_bound = this->upper_bound;
         new_builder.lower_bound = this->lower_bound;
         new_builder.join_mode = this->join_mode;
+        new_builder.hybrid_parallelism = this->hybrid_parallelism;
         return new_builder;
     }
 
@@ -1533,6 +1537,50 @@ public:
     }
 
     /** 
+     *  \brief Set Hyrbid Partitioning mode (version I).
+     *  
+     *  \return a reference to the builder object
+     */ 
+    auto &withHPMode(size_t _hybrid_parallelism)
+    {
+        if (!isKeyBySet) {
+            std::cerr << RED << "WindFlow Error: Interval_Join with hybrid parallelism mode requires a key extractor" << DEFAULT_COLOR << std::endl;
+            exit(EXIT_FAILURE);
+        }
+        if (join_mode != Join_Mode_t::NONE) {
+            std::cerr << RED << "WindFlow Error: wrong use of withHPMode() in the Interval_Join_Builder, you can specify only one mode per join operator" << DEFAULT_COLOR << std::endl;
+            exit(EXIT_FAILURE);
+        }
+        hybrid_parallelism = _hybrid_parallelism;
+        input_routing_mode = Routing_Mode_t::HYBRID_JOIN;
+        join_mode = Join_Mode_t::HP;
+        return *this;
+    }
+
+    /** 
+     *  \brief Set Hyrbid Partitioning mode (version II).
+     *  
+     *  \return a reference to the builder object
+     */ 
+    auto &withHPMode(size_t _hybrid_parallelism,
+                     const std::unordered_map<key_t, std::vector<int>> &_keyToJoiners)
+    {
+        if (!isKeyBySet) {
+            std::cerr << RED << "WindFlow Error: Interval_Join with hybrid parallelism mode requires a key extractor" << DEFAULT_COLOR << std::endl;
+            exit(EXIT_FAILURE);
+        }
+        if (join_mode != Join_Mode_t::NONE) {
+            std::cerr << RED << "WindFlow Error: wrong use of withHPMode() in the Interval_Join_Builder, you can specify only one mode per join operator" << DEFAULT_COLOR << std::endl;
+            exit(EXIT_FAILURE);
+        }
+        hybrid_parallelism = _hybrid_parallelism;
+        keyToJoiners = _keyToJoiners;
+        input_routing_mode = Routing_Mode_t::HYBRID_JOIN;
+        join_mode = Join_Mode_t::HP;
+        return *this;
+    }
+
+    /** 
      *  \brief Create the Interval Join
      *  
      *  \return a new Interval Join instance
@@ -1558,7 +1606,9 @@ public:
                       this->closing_func,
                       lower_bound,
                       upper_bound,
-                      join_mode);
+                      join_mode,
+                      hybrid_parallelism,
+                      keyToJoiners);
     }
 };
 

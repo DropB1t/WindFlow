@@ -126,14 +126,17 @@ private:
     };
 
     compare_func_t compare_func; // function to compare wrapper to an uint64 that rapresents a timestamp or a watermark
+    size_t ignored_tuples; // number of ignored tuples
     int64_t lower_bound; // lower bound of the interval (ts - lower_bound)
     int64_t upper_bound; // upper bound of the interval (ts + upper_bound)
     Join_Mode_t joinMode; // Interval Join operating mode
     std::unordered_map<key_t, Key_Descriptor> keyMap; // hash table that maps a descriptor for each key
-    uint64_t last_time; // last received watermark or timestamp
-    size_t ignored_tuples; // number of ignored tuples
+    uint64_t last_wm; // last received watermark or timestamp
+    std::unordered_map<key_t, uint64_t> last_wms; // last watermark received for each key, used in Hybrid Parallelism
     size_t id_inner; // id_inner value
     size_t num_inner; // num_inner value
+    size_t hybrid_degree; // hybrid degree of the emitter in case of hybrid parallelism
+    std::unordered_map<key_t, std::vector<int>> keyToJoiners; // mapping keys to replicas
 
     // Checks if the given Join_Stream_t is Stream A
     bool isStreamA(Join_Stream_t stream) const
@@ -149,12 +152,65 @@ private:
         isStreamA(stream) ? (_key_d.archiveA).insert(_wt) : (_key_d.archiveB).insert(_wt);
     }
 
+    // Calculates the FNV-1a hash value for the given key
+    const size_t fnv1a_hash(const void* key,
+                            const size_t len = sizeof(uint64_t))
+    {
+        const char* data = (char *)key;
+        const size_t prime = 0x1000193;
+        size_t hash = 0x811c9dc5;
+        for (int i = 0; i<len; i++) {
+            uint8_t value = data[i];
+            hash = hash ^ value;
+            hash *= prime;
+        }
+        return hash;
+    }
+
+    // Compute hash of tuple
+    size_t computeHashIndex(const tuple_t &_tuple,
+                            const uint64_t &_timestamp,
+                            size_t N)
+    {
+        size_t hash;
+        if constexpr(if_defined_hash<tuple_t>) {
+            hash = std::hash<tuple_t>()(_tuple);
+        }
+        else {
+            hash = fnv1a_hash(&_timestamp);
+        }
+        return hash % N;
+    }
+
+    // Compute index by using key and tuple hash (HP Version I)
+    size_t computeHashIndex(const key_t &key,
+                            const tuple_t &_tuple,
+                            const uint64_t &_timestamp)
+    {
+        size_t hash;
+        size_t id_offset = std::hash<key_t>()(key) % num_inner;
+        if constexpr(if_defined_hash<tuple_t>) {
+            hash = std::hash<tuple_t>()(_tuple);
+        }
+        else {
+            hash = fnv1a_hash(&_timestamp);
+        }
+        return ((hash % hybrid_degree) + id_offset) % num_inner;
+    }
+
+    // Compute index by using key hash and partitioning_counter ( Alternative HP Version I)
+    size_t computeHashIndex(const key_t &key, uint64_t partitioning_counter)
+    {
+        size_t id_offset = std::hash<key_t>()(key) % num_inner;
+        return ((partitioning_counter % hybrid_degree) + id_offset) % num_inner;
+    }
+
     // Purges the archives of the given key descriptor
-    void purgeArchives(Key_Descriptor &_key_d)
+    void purgeArchives(Key_Descriptor &_key_d, uint64_t check_point)
     {
         uint64_t idx_a = 0, idx_b = 0;
-        if ((upper_bound) <= static_cast<int64_t>(last_time))  { idx_a = last_time - upper_bound; }
-        if (-(lower_bound) <= static_cast<int64_t>(last_time)) { idx_b = last_time + lower_bound; }
+        if ((upper_bound) <= static_cast<int64_t>(check_point))  { idx_a = check_point - upper_bound; }
+        if (-(lower_bound) <= static_cast<int64_t>(check_point)) { idx_b = check_point + lower_bound; }
         (_key_d.archiveA).purge(idx_a);
         (_key_d.archiveB).purge(idx_b);
     }
@@ -164,7 +220,8 @@ private:
     {
         for (auto &k: keyMap) {
             Key_Descriptor &key_d = (k.second);
-            purgeArchives(key_d);
+            uint64_t wm = joinMode == Join_Mode_t::HP ? last_wms[k.first] : last_wm;
+            purgeArchives(key_d, wm);
         }
     }
 
@@ -178,8 +235,8 @@ public:
                   int64_t _lower_bound,
                   int64_t _upper_bound,
                   Join_Mode_t _join_mode,
-                  size_t _id_inner,
-                  size_t _num_inner):
+                  size_t _hybrid_degree,
+                  std::unordered_map<key_t, std::vector<int>> _keyToJoiners):
                   Basic_Replica(_opName, _context, _closing_func, false),
                   func(_func),
                   key_extr(_key_extr),
@@ -187,14 +244,16 @@ public:
                   lower_bound(_lower_bound),
                   upper_bound(_upper_bound),
                   joinMode(_join_mode),
-                  last_time(0),
+                  last_wm(0),
                   ignored_tuples(0),
-                  id_inner(_id_inner),
-                  num_inner(_num_inner)
+                  hybrid_degree(_hybrid_degree),
+                  keyToJoiners(_keyToJoiners)
     {
         compare_func = [](const wrapper_t &w1, const uint64_t &_idx) { // comparator function of wrapped tuples
             return w1.index < _idx;
         };
+        num_inner = _context.getParallelism();
+        id_inner = _context.getReplicaIndex();
     }
 
     // Copy Constructor
@@ -207,10 +266,12 @@ public:
                   lower_bound(_other.lower_bound),
                   upper_bound(_other.upper_bound),
                   joinMode(_other.joinMode),
-                  last_time(_other.last_time),
+                  last_wm(_other.last_wm),
                   ignored_tuples(_other.ignored_tuples),
                   id_inner(_other.id_inner),
-                  num_inner(_other.num_inner) {}
+                  num_inner(_other.num_inner),
+                  hybrid_degree(_other.hybrid_degree),
+                  keyToJoiners(_other.keyToJoiners) {}
 
     // svc (utilized by the FastFlow runtime)
     void *svc(void *_in) override
@@ -220,8 +281,15 @@ public:
             Batch_t<tuple_t> *batch_input = reinterpret_cast<Batch_t<tuple_t> *>(_in);
             if (batch_input->isPunct()) { // if it is a punctuaton
                 (this->emitter)->propagate_punctuation(batch_input->getWatermark((this->context).getReplicaIndex()), this); // propagate the received punctuation
-                assert(last_time <= batch_input->getWatermark((this->context).getReplicaIndex())); // sanity check
-                last_time = batch_input->getWatermark((this->context).getReplicaIndex());
+                if (joinMode == Join_Mode_t::HP) {
+                    key_t key = key_extr(batch_input->getTupleAtPos(0)); // get the key attribute of the punctuation
+                    assert(last_wms.find(key) != last_wms.end()); // sanity check
+                    assert(last_wms[key] <= batch_input->getWatermark((this->context).getReplicaIndex())); // sanity check
+                    last_wms[key] = batch_input->getWatermark((this->context).getReplicaIndex());
+                } else {
+                    assert(last_wm <= batch_input->getWatermark((this->context).getReplicaIndex())); // sanity check
+                    last_wm = batch_input->getWatermark((this->context).getReplicaIndex());
+                }
                 purgeWithPunct();
                 deleteBatch_t(batch_input); // delete the punctuation
                 return this->GO_ON;
@@ -239,8 +307,15 @@ public:
             Single_t<tuple_t> *input = reinterpret_cast<Single_t<tuple_t> *>(_in);
             if (input->isPunct()) { // if it is a punctuaton
                 (this->emitter)->propagate_punctuation(input->getWatermark((this->context).getReplicaIndex()), this); // propagate the received punctuation
-                assert(last_time <= input->getWatermark((this->context).getReplicaIndex())); // sanity check
-                last_time = input->getWatermark((this->context).getReplicaIndex());
+                if (joinMode == Join_Mode_t::HP) {
+                    key_t key = key_extr(input->tuple); // get the key attribute of the punctuation
+                    assert(last_wms.find(key) != last_wms.end()); // sanity check
+                    assert(last_wms[key] <= input->getWatermark((this->context).getReplicaIndex())); // sanity check
+                    last_wms[key] = input->getWatermark((this->context).getReplicaIndex());
+                } else {
+                    assert(last_wm <= input->getWatermark((this->context).getReplicaIndex())); // sanity check
+                    last_wm = input->getWatermark((this->context).getReplicaIndex());
+                }
                 purgeWithPunct();
                 deleteSingle_t(input); // delete the punctuation
                 return this->GO_ON;
@@ -262,7 +337,7 @@ public:
                        uint64_t _watermark,
                        Join_Stream_t _tag)
     {
-        if (this->execution_mode == Execution_Mode_t::DEFAULT && _timestamp < last_time) { // if the input is out-of-order
+        if (this->execution_mode == Execution_Mode_t::DEFAULT && joinMode != Join_Mode_t::HP && _timestamp < last_wm) { // if the input is out-of-order
 #if defined (WF_TRACING_ENABLED)
             stats_record.inputs_ignored++;
 #endif
@@ -274,6 +349,14 @@ public:
         if (it == keyMap.end()) {
             auto p = keyMap.insert(std::make_pair(key, Key_Descriptor(compare_func))); // create the state of the key
             it = p.first;
+            last_wms[key] = 0;
+        }
+        if (this->execution_mode == Execution_Mode_t::DEFAULT && joinMode == Join_Mode_t::HP && _timestamp < last_wms[key]) { // if the input is out-of-order
+#if defined (WF_TRACING_ENABLED)
+            stats_record.inputs_ignored++;
+#endif
+            ignored_tuples++;
+            return;
         }
         Key_Descriptor &key_d = (*it).second;
         uint64_t l_b = 0;
@@ -304,32 +387,81 @@ public:
             if (output) {
                 // use the highest timestamp between two joined tuples
                 uint64_t ts = (_timestamp >= interval.index_at(i)) ? _timestamp : interval.index_at(i);
-                this->doEmit(this->emitter, &(*output), 0, ts, _watermark, this);
+                uint64_t wm = _watermark;
+                if (joinMode == Join_Mode_t::HP) {
+                    wm = std::min_element(last_wms.begin(), last_wms.end(), [](const auto &p1, const auto &p2) {
+                        return p1.second < p2.second;
+                    })->second;
+                }
+                this->doEmit(this->emitter, &(*output), 0, ts, wm, this);
 #if defined (WF_TRACING_ENABLED)
                 (this->stats_record).outputs_sent++;
                 (this->stats_record).bytes_sent += sizeof(result_t);
 #endif
             }
         }
-        if (joinMode == Join_Mode_t::KP) {
+#if 1
+        if (joinMode == Join_Mode_t::KP) { // KP
             insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
         }
-        else if (joinMode == Join_Mode_t::DP) {
+        else { // DP or HP
             key_d.partitioning_counter++;
-            if (key_d.partitioning_counter % num_inner == id_inner) {
+            if (joinMode == Join_Mode_t::DP) { // DP
+                if (key_d.partitioning_counter % num_inner == id_inner) {
+                    insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
+                }
+            }
+            else { // HP
+                if (keyToJoiners.size() == 0) { // HP (Version I)
+                    size_t hash_id = computeHashIndex(key, key_d.partitioning_counter);
+                    if (hash_id == id_inner) {
+                        insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
+                    }
+                }
+                else { // HP (Version II)
+                    if (keyToJoiners[key][key_d.partitioning_counter % keyToJoiners[key].size()] == id_inner) {
+                        insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
+                    }
+                }
+            }
+        }
+#else
+        if (joinMode == Join_Mode_t::KP) { // KP
+            insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
+        }
+        else if (joinMode == Join_Mode_t::DP || joinMode == Join_Mode_t::HP) {
+            size_t hash_id;
+            if (joinMode == Join_Mode_t::DP) { // DP
+                hash_id = computeHashIndex(_tuple, _timestamp, num_inner);
+            }
+            else if (keyToJoiners.size() == 0) { // HP (Version I)
+                hash_id = computeHashIndex(key, _tuple, _timestamp);
+            }
+            else { // HP (Version II)
+                int pos = computeHashIndex(_tuple, _timestamp, keyToJoiners[key].size());
+                hash_id = keyToJoiners[key][pos];
+            }
+            if (hash_id == id_inner) {
                 insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
             }
         }
-        if (this->execution_mode == Execution_Mode_t::DEFAULT) {
-            assert(last_time <= _watermark); // sanity check
-            if (last_time < _watermark)
-                purgeArchives(key_d); // purge the archives using the new watermark
-            last_time = _watermark;
+#endif
+        if (this->execution_mode == Execution_Mode_t::DEFAULT && joinMode == Join_Mode_t::HP){
+            assert(last_wms[key] <= _watermark); // sanity check
+            if (last_wms[key] < _watermark)
+                purgeArchives(key_d, _watermark); // purge the archives using the new watermark
+            last_wms[key] = _watermark;
+        }
+        else if (this->execution_mode == Execution_Mode_t::DEFAULT) {
+            assert(last_wm <= _watermark); // sanity check
+            if (last_wm < _watermark)
+                purgeArchives(key_d, _watermark); // purge the archives using the new watermark
+            last_wm = _watermark;
         }
         else {
-            if (last_time < _timestamp) {
-                purgeArchives(key_d); // purge the archives using the new watermark
-                last_time = _timestamp;
+            if (last_wm < _timestamp) {
+                purgeArchives(key_d, _timestamp); // purge the archives using the new watermark
+                last_wm = _timestamp;
             }
         }
     }
@@ -340,9 +472,9 @@ public:
             return 0.0;
         double acc = 0;
         uint64_t n_key = 0;
-        for (auto &k: keyMap) {
-            Key_Descriptor &key_d = (k.second);
-            auto mean_size = (key_d.archive_metrics).getArchiveMeanSize();
+        for (const auto &k: keyMap) {
+            const Key_Descriptor &key_d = k.second;
+            auto mean_size = key_d.archive_metrics.getArchiveMeanSize();
             acc += mean_size;
             n_key++;
         }
@@ -385,7 +517,10 @@ private:
     Join_Mode_t joinMode; // Interval Join operating mode
     using tuple_t = decltype(get_tuple_t_Join(func)); // extracting the tuple_t type and checking the admissible signatures
     using result_t = decltype(get_result_t_Join(func)); // extracting the result_t type and checking the admissible signatures
+    using key_t = decltype(get_key_t_KeyExtr(key_extr)); // extracting the key_t type and checking the admissible singatures
     static constexpr op_type_t op_type = op_type_t::BASIC;
+    size_t hybrid_parallelism; // parallelism of the hybrid partitioning mode
+    std::unordered_map<key_t, std::vector<int>> keyToJoiners; // mapping keys to replicas
 
     // Configure the Interval Join to receive batches instead of individual inputs
     void receiveBatches(bool _input_batching) override
@@ -430,6 +565,18 @@ private:
     keyextr_func_t getKeyExtractor() const
     {
         return key_extr;
+    }
+
+    // Get the hybrid parallelism degree
+    size_t getHybridParallelism() const override
+    {
+        return hybrid_parallelism;
+    }
+
+    // Get a pointer to the map between keys and replicas
+    void *getKeysToJoiner() const override
+    {
+        return (void *) &keyToJoiners;
     }
 
 #if defined (WF_TRACING_ENABLED)
@@ -494,6 +641,8 @@ public:
      *  \param _lower_bound lower bound of the interval (ts - lower_bound)
      *  \param _upper_bound upper bound of the interval (ts - upper_bound)
      *  \param _join_mode Interval Join operating mode
+     *  \param _hybrid_parallelism parallelism of the hybrid partitioning mode
+     *  \param _keyToJoiners reference to a mapping between keys and replicas
      */ 
     Interval_Join(join_func_t _func,
                   keyextr_func_t _key_extr,
@@ -504,16 +653,35 @@ public:
                   std::function<void(RuntimeContext &)> _closing_func,
                   int64_t _lower_bound,
                   int64_t _upper_bound,
-                  Join_Mode_t _join_mode):
+                  Join_Mode_t _join_mode,
+                  size_t _hybrid_parallelism,
+                  const std::unordered_map<key_t, std::vector<int>> &_keyToJoiners):
                   Basic_Operator(_parallelism, _name, _input_routing_mode, _outputBatchSize),
                   func(_func),
                   key_extr(_key_extr),
                   lower_bound(_lower_bound),
                   upper_bound(_upper_bound),
-                  joinMode(_join_mode)
+                  joinMode(_join_mode),
+                  hybrid_parallelism(_hybrid_parallelism),
+                  keyToJoiners(_keyToJoiners)
     {
+        if (this->joinMode == Join_Mode_t::HP) {
+            if (this->hybrid_parallelism > this->parallelism) {
+                std::cerr << RED << "WindFlow Error: hybrid parallelism cannot be greater than the parallelism of the Interval Join" << DEFAULT_COLOR << std::endl;
+                exit(EXIT_FAILURE);
+            }
+        }
         for (size_t i=0; i<this->parallelism; i++) { // create the internal replicas of the Interval Join
-            replicas.push_back(new IJoin_Replica<join_func_t, keyextr_func_t>(_func, _key_extr, this->name, RuntimeContext(this->parallelism, i), _closing_func, _lower_bound, _upper_bound, _join_mode, i, this->parallelism));
+            replicas.push_back(new IJoin_Replica<join_func_t, keyextr_func_t>(this->func,
+                                                                              this->key_extr,
+                                                                              this->name,
+                                                                              RuntimeContext(this->parallelism, i),
+                                                                              _closing_func,
+                                                                              this->lower_bound,
+                                                                              this->upper_bound,
+                                                                              this->joinMode,
+                                                                              this->hybrid_parallelism,
+                                                                              keyToJoiners));
         }
     }
 
@@ -524,7 +692,9 @@ public:
                   key_extr(_other.key_extr),
                   lower_bound(_other.lower_bound),
                   upper_bound(_other.upper_bound),
-                  joinMode(_other.joinMode)
+                  joinMode(_other.joinMode),
+                  hybrid_parallelism(_other.hybrid_parallelism),
+                  keyToJoiners(_other.keyToJoiners)
     {
         for (size_t i=0; i<this->parallelism; i++) { // deep copy of the pointers to the Interval Join replicas
             replicas.push_back(new IJoin_Replica<join_func_t, keyextr_func_t>(*(_other.replicas[i])));
@@ -545,7 +715,19 @@ public:
      */ 
     std::string getType() const override
     {
-        return joinMode == Join_Mode_t::KP ? std::string("Interval_Join_KP") : std::string("Interval_Join_DP");
+        std::string joinModeStr = "Interval_Join_";
+        switch (joinMode) {
+            case Join_Mode_t::KP:
+                joinModeStr += "KP";
+                break;
+            case Join_Mode_t::DP:
+                joinModeStr += "DP";
+                break;
+            case Join_Mode_t::HP:
+                joinModeStr += "HP";
+                break;
+        }
+        return joinModeStr;
     }
 
     Interval_Join(Interval_Join &&) = delete; ///< Move constructor is deleted

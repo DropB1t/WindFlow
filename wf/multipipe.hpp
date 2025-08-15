@@ -47,6 +47,7 @@
 #include<basic.hpp>
 #include<basic_emitter.hpp>
 #include<keyby_emitter.hpp>
+#include<hybrid_join_emitter.hpp>
 #include<basic_operator.hpp>
 #include<forward_emitter.hpp>
 #include<broadcast_emitter.hpp>
@@ -205,17 +206,18 @@ private:
         size_t id=0;
         size_t separator_id=0;
         std::vector<ff::ff_node *> result;
-        if ((_operator.getType() == "Interval_Join_KP" || _operator.getType() == "Interval_Join_DP")) {
+        if ((_operator.getType() == "Interval_Join_KP" || _operator.getType() == "Interval_Join_DP" || _operator.getType() == "Interval_Join_HP")) {
             auto lastOps = this->getLastOperators();
             separator_id = lastOps.front()->getParallelism();
         }
         for (auto *r: _operator.replicas) {
             ff::ff_pipeline *stage = new ff::ff_pipeline();
             stage->add_stage(r, false);
-            // we use the Join_Collector if DEFAULT execution mode and DP join mode
-            if (_operator.getType() == "Interval_Join_DP" && execution_mode == Execution_Mode_t::DEFAULT) {
+            // we use the Join_Collector if DEFAULT execution mode and DP/HP join mode
+            if ((_operator.getType() == "Interval_Join_DP" || _operator.getType() == "Interval_Join_HP") && execution_mode == Execution_Mode_t::DEFAULT) {
                 r->receiveBatches(_needBatching);
-                auto *collector = new Join_Collector<decltype(_operator.getKeyExtractor())>(_operator.getKeyExtractor(), _ordering_mode, execution_mode, Join_Mode_t::DP, id++, _needBatching, separator_id);
+                Join_Mode_t join_mode = _operator.getType() == "Interval_Join_DP" ? Join_Mode_t::DP : Join_Mode_t::HP;
+                auto *collector = new Join_Collector<decltype(_operator.getKeyExtractor())>(_operator.getKeyExtractor(), _ordering_mode, execution_mode, join_mode, id++, _needBatching, separator_id);
                 combine_with_firststage(*stage, collector, true); // combine with the Join_Collector
             }
             else if (_operator.getType() == "Parallel_Windows_WLQ" || _operator.getType() == "Parallel_Windows_REDUCE") { // special cases
@@ -245,115 +247,117 @@ private:
 
 #if !defined (__CUDACC__)
     // Create the right emitter to be used to connect to the next operator
-    template<typename keyextr_func_t, bool isDestGPUType>
-    Basic_Emitter *create_emitter(typename std::enable_if<!isDestGPUType, keyextr_func_t>::type _key_extr,
-                                  Routing_Mode_t _routing_mode,
-                                  size_t _num_dests,
+    template<typename operator_t>
+    Basic_Emitter *create_emitter(const operator_t &_op,
                                   size_t _outputBatchSize,
                                   bool isSourceGPU=false,
-                                  bool isDestGPU=false) const
+                                  bool isDestGPU=false,
+                                  bool isForward=false) const
     {
-        assert(!isSourceGPU && !isDestGPU); // sanity check
-        if (_routing_mode == Routing_Mode_t::FORWARD) { // FW
-            return new Forward_Emitter<decltype(_key_extr)>(_key_extr, _num_dests, _outputBatchSize);
+        assert(!isSourceGPU && !isDestGPU); // sanity check (only CPU->CPU case)
+        auto key_extr = _op.getKeyExtractor();
+        auto routing_mode = _op.getInputRoutingMode();
+        auto num_dests = !isForward ? (_op.replicas).size() : 1;
+        if (routing_mode == Routing_Mode_t::FORWARD) { // FW
+            return new Forward_Emitter<decltype(key_extr)>(key_extr, num_dests, _outputBatchSize);
         }
-        else if (_routing_mode == Routing_Mode_t::REBALANCING) { // RB
-            return new Forward_Emitter<decltype(_key_extr)>(_key_extr, _num_dests, _outputBatchSize);
+        else if (routing_mode == Routing_Mode_t::REBALANCING) { // RB
+            return new Forward_Emitter<decltype(key_extr)>(key_extr, num_dests, _outputBatchSize);
         }
-        else if (_routing_mode == Routing_Mode_t::KEYBY) { // KB
-            return new KeyBy_Emitter<decltype(_key_extr)>(_key_extr, _num_dests, execution_mode, _outputBatchSize);
+        else if (routing_mode == Routing_Mode_t::KEYBY) { // KB
+            return new KeyBy_Emitter<decltype(key_extr)>(key_extr, num_dests, execution_mode, _outputBatchSize);
         }
-        else if (_routing_mode == Routing_Mode_t::BROADCAST) { // BD
-            return new Broadcast_Emitter<decltype(_key_extr)>(_key_extr, _num_dests, _outputBatchSize);
+        else if (routing_mode == Routing_Mode_t::BROADCAST) { // BD
+            return new Broadcast_Emitter<decltype(key_extr)>(key_extr, num_dests, _outputBatchSize);
+        }
+        else if (routing_mode == Routing_Mode_t::HYBRID_JOIN) { // HJ
+            return new HybridJoin_Emitter<decltype(key_extr)>(key_extr, num_dests, _op.getHybridParallelism(), _op.getKeysToJoiner(), _outputBatchSize);
         }
         else {
             abort();
         }
     }
-
 #else
     // Create the right emitter to be used to connect to the next operator
-    template<typename keyextr_func_t, bool isDestGPUType>
-    Basic_Emitter *create_emitter(typename std::enable_if<!isDestGPUType, keyextr_func_t>::type _key_extr,
-                                  Routing_Mode_t _routing_mode,
-                                  size_t _num_dests,
+    template<typename operator_t>
+    Basic_Emitter *create_emitter(const operator_t &_op,
                                   size_t _outputBatchSize,
                                   bool isSourceGPU=false,
-                                  bool isDestGPU=false) const
+                                  bool isDestGPU=false,
+                                  bool isForward=false) const
     {
-        assert(!isDestGPU); // sanity check
+        auto key_extr = _op.getKeyExtractor();
+        auto routing_mode = _op.getInputRoutingMode();
+        auto num_dests = !isForward ? (_op.replicas).size() : 1;
         if (!isSourceGPU && !isDestGPU) { // CPU -> CPU case
-            if (_routing_mode == Routing_Mode_t::FORWARD) { // FW
-                return new Forward_Emitter<decltype(_key_extr)>(_key_extr, _num_dests, _outputBatchSize);
+            if (routing_mode == Routing_Mode_t::FORWARD) { // FW
+                return new Forward_Emitter<decltype(key_extr)>(key_extr, num_dests, _outputBatchSize);
             }
-            else if (_routing_mode == Routing_Mode_t::REBALANCING) { // RB
-                return new Forward_Emitter<decltype(_key_extr)>(_key_extr, _num_dests, _outputBatchSize);
+            else if (routing_mode == Routing_Mode_t::REBALANCING) { // RB
+                return new Forward_Emitter<decltype(key_extr)>(key_extr, num_dests, _outputBatchSize);
             }
-            else if (_routing_mode == Routing_Mode_t::KEYBY) { // KB
-                return new KeyBy_Emitter<decltype(_key_extr)>(_key_extr, _num_dests, execution_mode, _outputBatchSize);
+            else if (routing_mode == Routing_Mode_t::KEYBY) { // KB
+                return new KeyBy_Emitter<decltype(key_extr)>(key_extr, num_dests, execution_mode, _outputBatchSize);
             }
-            else if (_routing_mode == Routing_Mode_t::BROADCAST) { // BD
-                return new Broadcast_Emitter<decltype(_key_extr)>(_key_extr, _num_dests, _outputBatchSize);
+            else if (routing_mode == Routing_Mode_t::BROADCAST) { // BD
+                return new Broadcast_Emitter<decltype(key_extr)>(key_extr, num_dests, _outputBatchSize);
+            }
+            else if (routing_mode == Routing_Mode_t::HYBRID_JOIN) { // HJ
+                return new HybridJoin_Emitter<decltype(key_extr)>(key_extr, num_dests, _op.getHybridParallelism(), _op.getKeysToJoiner(), _outputBatchSize);
             }
             else {
                 abort();
             }
         }
         else if (isSourceGPU && !isDestGPU) { // GPU -> CPU case
-            if (_routing_mode == Routing_Mode_t::FORWARD) { // FW
-                return new Forward_Emitter_GPU<decltype(_key_extr), true, false>(_key_extr, _num_dests);
+            if (routing_mode == Routing_Mode_t::FORWARD) { // FW
+                return new Forward_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
             }
-            else if (_routing_mode == Routing_Mode_t::REBALANCING) { // RB
-                return new Forward_Emitter_GPU<decltype(_key_extr), true, false>(_key_extr, _num_dests);
+            else if (routing_mode == Routing_Mode_t::REBALANCING) { // RB
+                return new Forward_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
             }
-            else if (_routing_mode == Routing_Mode_t::KEYBY) { // KB
-                return new KeyBy_Emitter_GPU<decltype(_key_extr), true, false>(_key_extr, _num_dests);
+            else if (routing_mode == Routing_Mode_t::KEYBY) { // KB
+                return new KeyBy_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
             }
-            else if (_routing_mode == Routing_Mode_t::BROADCAST) { // BD
-                return new Broadcast_Emitter_GPU<decltype(_key_extr), true, false>(_key_extr, _num_dests);
+            else if (routing_mode == Routing_Mode_t::BROADCAST) { // BD
+                return new Broadcast_Emitter_GPU<decltype(key_extr), true, false>(key_extr, num_dests);
+            }
+            else if (routing_mode == Routing_Mode_t::HYBRID_JOIN) { // HJ
+                abort();
             }
             else {
                 abort();
             }
         }
-        else {
-            return nullptr;
-        }
-    }
-
-    // Create the right emitter to be used to connect to the next operator
-    template<typename keyextr_func_t, bool isDestGPUType>
-    Basic_Emitter *create_emitter(typename std::enable_if<isDestGPUType, keyextr_func_t>::type _key_extr,
-                                  Routing_Mode_t _routing_mode,
-                                  size_t _num_dests,
-                                  size_t _outputBatchSize,
-                                  bool isSourceGPU,
-                                  bool isDestGPU) const
-    {
-        assert(isDestGPU); // sanity check
-        if (isSourceGPU && isDestGPU) { // GPU -> GPU case
-            if (_routing_mode == Routing_Mode_t::FORWARD) { // FW
-                return new Forward_Emitter_GPU<decltype(_key_extr), true, true>(_key_extr, _num_dests);
+        else if (isSourceGPU && isDestGPU) { // GPU -> GPU case
+            if (routing_mode == Routing_Mode_t::FORWARD) { // FW
+                return new Forward_Emitter_GPU<decltype(key_extr), true, true>(key_extr, num_dests);
             }
-            else if (_routing_mode == Routing_Mode_t::REBALANCING) { // RB
-                return new Forward_Emitter_GPU<decltype(_key_extr), true, true>(_key_extr, _num_dests);
+            else if (routing_mode == Routing_Mode_t::REBALANCING) { // RB
+                return new Forward_Emitter_GPU<decltype(key_extr), true, true>(key_extr, num_dests);
             }
-            else if (_routing_mode == Routing_Mode_t::KEYBY) { // KB
-                return new KeyBy_Emitter_GPU<decltype(_key_extr), true, true>(_key_extr, _num_dests);
+            else if (routing_mode == Routing_Mode_t::KEYBY) { // KB
+                return new KeyBy_Emitter_GPU<decltype(key_extr), true, true>(key_extr, num_dests);
+            }
+            else if (routing_mode == Routing_Mode_t::HYBRID_JOIN) { // HJ
+                abort();
             }
             else {
                 abort();
             }
         }
         else { // CPU -> GPU case
-            if (_routing_mode == Routing_Mode_t::FORWARD) { // FW
-                return new Forward_Emitter_GPU<decltype(_key_extr), false, true>(_key_extr, _num_dests, _outputBatchSize);
+            if (routing_mode == Routing_Mode_t::FORWARD) { // FW
+                return new Forward_Emitter_GPU<decltype(key_extr), false, true>(key_extr, num_dests, _outputBatchSize);
             }
-            else if (_routing_mode == Routing_Mode_t::REBALANCING) { // RB
-                return new Forward_Emitter_GPU<decltype(_key_extr), false, true>(_key_extr, _num_dests, _outputBatchSize);
+            else if (routing_mode == Routing_Mode_t::REBALANCING) { // RB
+                return new Forward_Emitter_GPU<decltype(key_extr), false, true>(key_extr, num_dests, _outputBatchSize);
             }
-            else if (_routing_mode == Routing_Mode_t::KEYBY) { // KB
-                return new KeyBy_Emitter_GPU<decltype(_key_extr), false, true>(_key_extr, _num_dests, _outputBatchSize);
+            else if (routing_mode == Routing_Mode_t::KEYBY) { // KB
+                return new KeyBy_Emitter_GPU<decltype(key_extr), false, true>(key_extr, num_dests, _outputBatchSize);
+            }
+            else if (routing_mode == Routing_Mode_t::HYBRID_JOIN) { // HJ
+                abort();
             }
             else {
                 abort();
@@ -424,7 +428,7 @@ private:
     }
 
     // Add an operator to the MultiPipe
-    template<typename operator_t, bool isDestGPUType=false>
+    template<typename operator_t>
     void add_operator(operator_t &_operator, ordering_mode_t _ordering_mode)
     {
         if (!has_source) { // check the Source presence
@@ -443,7 +447,7 @@ private:
             std::cerr << RED << "WindFlow Error: MultiPipe has been split, operator cannot be added" << DEFAULT_COLOR << std::endl;
             exit(EXIT_FAILURE);
         }
-        if (auto lastOps = this->getLastOperators(); (_operator.getType() == "Interval_Join_KP" || _operator.getType() == "Interval_Join_DP") && (!fromMerging || localOpList.size() != 0 || lastOps.size() != 2) ) {
+        if (auto lastOps = this->getLastOperators(); (_operator.getType() == "Interval_Join_KP" || _operator.getType() == "Interval_Join_DP" || _operator.getType() == "Interval_Join_HP") && (!fromMerging || localOpList.size() != 0 || lastOps.size() != 2) ) {
             std::cerr << RED << "WindFlow Error: Join operators must be added after a merge of exactly two MultiPipes" << DEFAULT_COLOR << std::endl;
             exit(EXIT_FAILURE);
         }
@@ -469,7 +473,7 @@ private:
             this->add_stage(matrioska, true);
             last = matrioska;
             lastParallelism = (_operator.replicas).size(); // save parallelism of the operator
-            Basic_Emitter *emitter = create_emitter<decltype(_operator.getKeyExtractor()), isDestGPUType>(_operator.getKeyExtractor(), _operator.getInputRoutingMode(), (_operator.replicas).size(), outputBatchSize, isSourceGPU, isDestGPU);
+            Basic_Emitter *emitter = create_emitter<decltype(_operator)>(_operator, outputBatchSize, isSourceGPU, isDestGPU);
             splittingParent->setEmitterLeaf(emitter); // set the emitter leaf in the parent MultiPipe
         }
         else {
@@ -492,12 +496,13 @@ private:
                     ff::ff_pipeline *stage = static_cast<ff::ff_pipeline *>(first_set[i]);
                     stage->add_stage((_operator.replicas)[i], false);
                 }
-                (localOpList.back())->setEmitter(create_emitter<decltype(_operator.getKeyExtractor()), isDestGPUType>(_operator.getKeyExtractor(), _operator.getInputRoutingMode(), 1, outputBatchSize, isSourceGPU, isDestGPU));
+                (localOpList.back())->setEmitter(create_emitter<decltype(_operator)>(_operator, outputBatchSize, isSourceGPU, isDestGPU, true));
             }
             else { // Case 3: shuffle connection
                 auto lastOps = this->getLastOperators();
                 bool needBatching = false;
                 bool isDestGPU = _operator.isGPUOperator();
+                // Here add the conditional parallelism fetching for the Interval_Join_HP operator
                 for (auto *op: lastOps) {
                     if (isDestGPU || op->getOutputBatchSize() > 0) {
                         needBatching = true;
@@ -513,7 +518,7 @@ private:
                     if (needBatching && op->getOutputBatchSize() == 0) {
                         outputBatchSize = 1; // force to use batching
                     }
-                    op->setEmitter(create_emitter<decltype(_operator.getKeyExtractor()), isDestGPUType>(_operator.getKeyExtractor(), _operator.getInputRoutingMode(), _operator.getParallelism(), outputBatchSize, isSourceGPU, isDestGPU));
+                    op->setEmitter(create_emitter<decltype(_operator)>(_operator, outputBatchSize, isSourceGPU, isDestGPU));
                 }
                 ff::ff_a2a *matrioska = new ff::ff_a2a(); // create a new matrioska
                 std::vector<ff::ff_node *> first_set = combine_with_collector(_operator, _ordering_mode, needBatching);
@@ -534,7 +539,7 @@ private:
     }
 
     // Try to chain an operator with the previous one in the MultiPipe (it is added otherwise)
-    template<typename operator_t, bool isDestGPUType=false>
+    template<typename operator_t>
     bool chain_operator(operator_t &_operator, ordering_mode_t _ordering_mode)
     {
         if (!has_source) { // check the Source presence
@@ -554,11 +559,11 @@ private:
             exit(EXIT_FAILURE);
         }
         if (fromSplitting && last == nullptr) { // corner case -> first operator after splitting can never be chained
-            add_operator<operator_t, isDestGPUType>(_operator, _ordering_mode);
+            add_operator<operator_t>(_operator, _ordering_mode);
             return false;
         }
         if (fromMerging && localOpList.size() == 0) { // corner case -> first operator after merging can never be chained
-            add_operator<operator_t, isDestGPUType>(_operator, _ordering_mode);
+            add_operator<operator_t>(_operator, _ordering_mode);
             return false;
         }
         assert(localOpList.size() > 0); // sanity check
@@ -579,12 +584,12 @@ private:
                 worker->receiveBatches(outputBatchSize > 0);
                 combine_with_laststage(*stage, worker, false);
             }
-            (localOpList.back())->setEmitter(create_emitter<decltype(_operator.getKeyExtractor()), isDestGPUType>(_operator.getKeyExtractor(), _operator.getInputRoutingMode(), 1, outputBatchSize, isSourceGPU, isDestGPU));
+            (localOpList.back())->setEmitter(create_emitter<decltype(_operator)>(_operator, outputBatchSize, isSourceGPU, isDestGPU, true));
             lastParallelism = n2; // save the parallelism of the new operator
             return true;
         }
         else {
-            add_operator<operator_t, isDestGPUType>(_operator, _ordering_mode);
+            add_operator<operator_t>(_operator, _ordering_mode);
             return false;
         }
     }
@@ -971,7 +976,7 @@ public:
             auto *copied_op = new op_t(_op); // create a copy of the operator
             copied_op->setExecutionMode(execution_mode);
             checkInputType(*copied_op);
-            add_operator<decltype(*copied_op), true>(*copied_op, ordering_mode_t::TS);
+            add_operator<decltype(*copied_op)>(*copied_op, ordering_mode_t::TS);
             localOpList.push_back(copied_op);
             globalOpList->push_back(copied_op);
 #if defined (WF_TRACING_ENABLED)
@@ -1018,7 +1023,7 @@ public:
             auto *copied_op = new op_t(_op);
             copied_op->setExecutionMode(execution_mode);
             checkInputType(*copied_op);
-            add_operator<decltype(*copied_op), true>(*copied_op, ordering_mode_t::TS);
+            add_operator<decltype(*copied_op)>(*copied_op, ordering_mode_t::TS);
             localOpList.push_back(copied_op);
             globalOpList->push_back(copied_op);
 #if defined (WF_TRACING_ENABLED)
@@ -1081,7 +1086,7 @@ public:
             auto *copied_op = new op_t(_op); // create a copy of the operator
             copied_op->setExecutionMode(execution_mode);
             checkInputType(*copied_op);
-            bool isChained = chain_operator<decltype(*copied_op), true>(*copied_op, ordering_mode_t::TS); // try to chain the operator (otherwise, it is added)
+            bool isChained = chain_operator<decltype(*copied_op)>(*copied_op, ordering_mode_t::TS); // try to chain the operator (otherwise, it is added)
             localOpList.push_back(copied_op);
             globalOpList->push_back(copied_op);
 #if defined (WF_TRACING_ENABLED)

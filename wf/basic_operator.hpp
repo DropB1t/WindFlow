@@ -375,6 +375,24 @@ public:
         return isGpuOP;
     }
 
+    /** 
+     *  \brief Get the hybrid parallelism degree (not a good interface)
+     *  \return hybrid parallelism degree
+     */ 
+    virtual size_t getHybridParallelism() const
+    {
+        return 0;
+    }
+
+    /** 
+     *  \brief // Get a pointer to the map between keys and replicas  (not a good interface)
+     *  \return map keys to replicas
+     */ 
+    virtual void* getKeysToJoiner() const
+    {
+        return nullptr;
+    }
+
     Basic_Operator(Basic_Operator &&) = delete; ///< Move constructor is deleted
     Basic_Operator &operator=(const Basic_Operator &) = delete; ///< Copy assignment operator is deleted
     Basic_Operator &operator=(Basic_Operator &&) = delete; ///< Move assignment operator is deleted

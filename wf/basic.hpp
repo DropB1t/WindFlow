@@ -84,13 +84,13 @@ enum class Time_Policy_t { INGRESS_TIME, EVENT_TIME };
 enum class Win_Type_t { CB, TB }; // CB = count based, TB = time based
 
 /// Supported interval join operating modes
-enum class Join_Mode_t { NONE, KP, DP };
+enum class Join_Mode_t { NONE, KP, DP, HP };
 
 /// Supported interval join stream tagging
 enum class Join_Stream_t { NONE, A, B };
 
 /// Routing modes to distribute inputs to the replicas of an operator
-enum class Routing_Mode_t { NONE, FORWARD, KEYBY, BROADCAST, REBALANCING };
+enum class Routing_Mode_t { NONE, FORWARD, KEYBY, BROADCAST, REBALANCING, HYBRID_JOIN };
 
 /// Forward declaration of the Source operator
 template<typename source_func_t>
