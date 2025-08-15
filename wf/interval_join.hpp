@@ -580,7 +580,7 @@ private:
     }
 
 #if defined (WF_TRACING_ENABLED)
-    // Append the statistics (JSON format) of the Map to a PrettyWriter
+    // Append the statistics (JSON format) of the Interval Join to a PrettyWriter
     void appendStats(rapidjson::PrettyWriter<rapidjson::StringBuffer> &writer) const override
     {
         writer.StartObject(); // create the header of the JSON file
@@ -594,6 +594,9 @@ private:
         }
         else if (this->getInputRoutingMode() == Routing_Mode_t::BROADCAST) {
             writer.String("BROADCAST");
+        }
+        else if (this->getInputRoutingMode() == Routing_Mode_t::HYBRID_JOIN) {
+            writer.String("HYBRID_JOIN");
         }
         writer.Key("isTerminated");
         writer.Bool(this->isTerminated());
@@ -615,6 +618,9 @@ private:
         }
         else if (this->joinMode == Join_Mode_t::DP) {
             writer.String("Data-Parallelism");
+        }
+        else if (this->joinMode == Join_Mode_t::HP) {
+            writer.String("Hybrid-Parallelism");
         }
         writer.Key("Replicas");
         writer.StartArray();
