@@ -129,7 +129,7 @@ private:
     size_t ignored_tuples; // number of ignored tuples
     int64_t lower_bound; // lower bound of the interval (ts - lower_bound)
     int64_t upper_bound; // upper bound of the interval (ts + upper_bound)
-    Join_Mode_t joinMode; // Interval Join operating mode
+    Join_Mode_t join_mode; // Interval Join operating mode
     std::unordered_map<key_t, Key_Descriptor> keyMap; // hash table that maps a descriptor for each key
     uint64_t last_wm; // last received watermark or timestamp
     std::unordered_map<key_t, uint64_t> last_wms; // last watermark received for each key, used in Hybrid Parallelism
@@ -198,7 +198,7 @@ private:
         return ((hash % hybrid_degree) + id_offset) % num_inner;
     }
 
-    // Compute index by using key hash and partitioning_counter ( Alternative HP Version I)
+    // Compute index by using key hash and partitioning_counter (Alternative HP Version I)
     size_t computeHashIndex(const key_t &key, uint64_t partitioning_counter)
     {
         size_t id_offset = std::hash<key_t>()(key) % num_inner;
@@ -220,7 +220,7 @@ private:
     {
         for (auto &k: keyMap) {
             Key_Descriptor &key_d = (k.second);
-            uint64_t wm = joinMode == Join_Mode_t::HP ? last_wms[k.first] : last_wm;
+            uint64_t wm = join_mode == Join_Mode_t::HP ? last_wms[k.first] : last_wm;
             purgeArchives(key_d, wm);
         }
     }
@@ -243,7 +243,7 @@ public:
                   last_measured_size_time(current_time_nsecs()),
                   lower_bound(_lower_bound),
                   upper_bound(_upper_bound),
-                  joinMode(_join_mode),
+                  join_mode(_join_mode),
                   last_wm(0),
                   ignored_tuples(0),
                   hybrid_degree(_hybrid_degree),
@@ -265,7 +265,7 @@ public:
                   compare_func(_other.compare_func),
                   lower_bound(_other.lower_bound),
                   upper_bound(_other.upper_bound),
-                  joinMode(_other.joinMode),
+                  join_mode(_other.join_mode),
                   last_wm(_other.last_wm),
                   ignored_tuples(_other.ignored_tuples),
                   id_inner(_other.id_inner),
@@ -281,7 +281,7 @@ public:
             Batch_t<tuple_t> *batch_input = reinterpret_cast<Batch_t<tuple_t> *>(_in);
             if (batch_input->isPunct()) { // if it is a punctuaton
                 (this->emitter)->propagate_punctuation(batch_input->getWatermark((this->context).getReplicaIndex()), this); // propagate the received punctuation
-                if (joinMode == Join_Mode_t::HP) {
+                if (join_mode == Join_Mode_t::HP) {
                     key_t key = key_extr(batch_input->getTupleAtPos(0)); // get the key attribute of the punctuation
                     assert(last_wms.find(key) != last_wms.end()); // sanity check
                     assert(last_wms[key] <= batch_input->getWatermark((this->context).getReplicaIndex())); // sanity check
@@ -307,7 +307,7 @@ public:
             Single_t<tuple_t> *input = reinterpret_cast<Single_t<tuple_t> *>(_in);
             if (input->isPunct()) { // if it is a punctuaton
                 (this->emitter)->propagate_punctuation(input->getWatermark((this->context).getReplicaIndex()), this); // propagate the received punctuation
-                if (joinMode == Join_Mode_t::HP) {
+                if (join_mode == Join_Mode_t::HP) {
                     key_t key = key_extr(input->tuple); // get the key attribute of the punctuation
                     assert(last_wms.find(key) != last_wms.end()); // sanity check
                     assert(last_wms[key] <= input->getWatermark((this->context).getReplicaIndex())); // sanity check
@@ -337,7 +337,7 @@ public:
                        uint64_t _watermark,
                        Join_Stream_t _tag)
     {
-        if (this->execution_mode == Execution_Mode_t::DEFAULT && joinMode != Join_Mode_t::HP && _timestamp < last_wm) { // if the input is out-of-order
+        if (this->execution_mode == Execution_Mode_t::DEFAULT && join_mode != Join_Mode_t::HP && _timestamp < last_wm) { // if the input is out-of-order
 #if defined (WF_TRACING_ENABLED)
             stats_record.inputs_ignored++;
 #endif
@@ -351,7 +351,7 @@ public:
             it = p.first;
             last_wms[key] = 0;
         }
-        if (this->execution_mode == Execution_Mode_t::DEFAULT && joinMode == Join_Mode_t::HP && _timestamp < last_wms[key]) { // if the input is out-of-order
+        if (this->execution_mode == Execution_Mode_t::DEFAULT && join_mode == Join_Mode_t::HP && _timestamp < last_wms[key]) { // if the input is out-of-order
 #if defined (WF_TRACING_ENABLED)
             stats_record.inputs_ignored++;
 #endif
@@ -388,7 +388,7 @@ public:
                 // use the highest timestamp between two joined tuples
                 uint64_t ts = (_timestamp >= interval.index_at(i)) ? _timestamp : interval.index_at(i);
                 uint64_t wm = _watermark;
-                if (joinMode == Join_Mode_t::HP) {
+                if (join_mode == Join_Mode_t::HP) {
                     wm = std::min_element(last_wms.begin(), last_wms.end(), [](const auto &p1, const auto &p2) {
                         return p1.second < p2.second;
                     })->second;
@@ -401,12 +401,12 @@ public:
             }
         }
 #if 1
-        if (joinMode == Join_Mode_t::KP) { // KP
+        if (join_mode == Join_Mode_t::KP) { // KP
             insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
         }
         else { // DP or HP
             key_d.partitioning_counter++;
-            if (joinMode == Join_Mode_t::DP) { // DP
+            if (join_mode == Join_Mode_t::DP) { // DP
                 if (key_d.partitioning_counter % num_inner == id_inner) {
                     insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
                 }
@@ -426,12 +426,12 @@ public:
             }
         }
 #else
-        if (joinMode == Join_Mode_t::KP) { // KP
+        if (join_mode == Join_Mode_t::KP) { // KP
             insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
         }
-        else if (joinMode == Join_Mode_t::DP || joinMode == Join_Mode_t::HP) {
+        else if (join_mode == Join_Mode_t::DP || join_mode == Join_Mode_t::HP) {
             size_t hash_id;
-            if (joinMode == Join_Mode_t::DP) { // DP
+            if (join_mode == Join_Mode_t::DP) { // DP
                 hash_id = computeHashIndex(_tuple, _timestamp, num_inner);
             }
             else if (keyToJoiners.size() == 0) { // HP (Version I)
@@ -446,7 +446,7 @@ public:
             }
         }
 #endif
-        if (this->execution_mode == Execution_Mode_t::DEFAULT && joinMode == Join_Mode_t::HP){
+        if (this->execution_mode == Execution_Mode_t::DEFAULT && join_mode == Join_Mode_t::HP){
             assert(last_wms[key] <= _watermark); // sanity check
             if (last_wms[key] < _watermark)
                 purgeArchives(key_d, _watermark); // purge the archives using the new watermark
@@ -501,7 +501,7 @@ public:
  *  
  *  The Interval Join operator performs a join operation over two streams based on a specified interval condition.
  *  It takes a functional Boolean condition logic and a key extractor logic as input. The operator operates in
- *  either Key-Parallelism (KP) or Data-Parallelism (DP) mode.
+ *  either Key-Parallelism (KP), Data-Parallelism (DP) or Hybrid-Parallelism mode.
  */ 
 template<typename join_func_t, typename keyextr_func_t>
 class Interval_Join: public Basic_Operator
@@ -514,7 +514,7 @@ private:
     std::vector<IJoin_Replica<join_func_t, keyextr_func_t>*> replicas; // vector of pointers to the replicas of the Interval Join
     int64_t lower_bound; // lower bound of the interval, can be negative (ts + lower_bound)
     int64_t upper_bound; // upper bound of the interval, can be negative (ts + upper_bound)
-    Join_Mode_t joinMode; // Interval Join operating mode
+    Join_Mode_t join_mode; // Interval Join operating mode
     using tuple_t = decltype(get_tuple_t_Join(func)); // extracting the tuple_t type and checking the admissible signatures
     using result_t = decltype(get_result_t_Join(func)); // extracting the result_t type and checking the admissible signatures
     using key_t = decltype(get_key_t_KeyExtr(key_extr)); // extracting the key_t type and checking the admissible singatures
@@ -613,13 +613,13 @@ private:
         writer.Key("Uper_Bound");
         writer.Int64(upper_bound);
         writer.Key("Join_Mode");
-        if (this->joinMode == Join_Mode_t::KP) {
+        if (this->join_mode == Join_Mode_t::KP) {
             writer.String("Key-Parallelism");
         }
-        else if (this->joinMode == Join_Mode_t::DP) {
+        else if (this->join_mode == Join_Mode_t::DP) {
             writer.String("Data-Parallelism");
         }
-        else if (this->joinMode == Join_Mode_t::HP) {
+        else if (this->join_mode == Join_Mode_t::HP) {
             writer.String("Hybrid-Parallelism");
         }
         writer.Key("Replicas");
@@ -667,11 +667,11 @@ public:
                   key_extr(_key_extr),
                   lower_bound(_lower_bound),
                   upper_bound(_upper_bound),
-                  joinMode(_join_mode),
+                  join_mode(_join_mode),
                   hybrid_parallelism(_hybrid_parallelism),
                   keyToJoiners(_keyToJoiners)
     {
-        if (this->joinMode == Join_Mode_t::HP) {
+        if (this->join_mode == Join_Mode_t::HP) {
             if (this->hybrid_parallelism > this->parallelism) {
                 std::cerr << RED << "WindFlow Error: hybrid parallelism cannot be greater than the parallelism of the Interval Join" << DEFAULT_COLOR << std::endl;
                 exit(EXIT_FAILURE);
@@ -685,7 +685,7 @@ public:
                                                                               _closing_func,
                                                                               this->lower_bound,
                                                                               this->upper_bound,
-                                                                              this->joinMode,
+                                                                              this->join_mode,
                                                                               this->hybrid_parallelism,
                                                                               keyToJoiners));
         }
@@ -698,7 +698,7 @@ public:
                   key_extr(_other.key_extr),
                   lower_bound(_other.lower_bound),
                   upper_bound(_other.upper_bound),
-                  joinMode(_other.joinMode),
+                  join_mode(_other.join_mode),
                   hybrid_parallelism(_other.hybrid_parallelism),
                   keyToJoiners(_other.keyToJoiners)
     {
@@ -721,19 +721,19 @@ public:
      */ 
     std::string getType() const override
     {
-        std::string joinModeStr = "Interval_Join_";
-        switch (joinMode) {
+        std::string join_mode_str = "Interval_Join_";
+        switch (join_mode) {
             case Join_Mode_t::KP:
-                joinModeStr += "KP";
+                join_mode_str += "KP";
                 break;
             case Join_Mode_t::DP:
-                joinModeStr += "DP";
+                join_mode_str += "DP";
                 break;
             case Join_Mode_t::HP:
-                joinModeStr += "HP";
+                join_mode_str += "HP";
                 break;
         }
-        return joinModeStr;
+        return join_mode_str;
     }
 
     Interval_Join(Interval_Join &&) = delete; ///< Move constructor is deleted
