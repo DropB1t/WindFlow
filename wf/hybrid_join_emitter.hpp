@@ -220,7 +220,6 @@ public:
         else { // hybrid version II
             assert(keysToJoiner->find(key) != keysToJoiner->end()); // sanity check
             (_output->delete_counter).fetch_add((*keysToJoiner)[key].size()-1);
-            assert((_output->fields).size() == 3); // sanity check
             (_output->fields).insert((_output->fields).end(), num_dests-1, (_output->fields)[2]); // copy the watermark (having one per destination)    
             for (auto i: (*keysToJoiner)[key]) {
                 if (!useTreeMode) { // real send
