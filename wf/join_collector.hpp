@@ -158,14 +158,14 @@ private:
         }
 
         // Increment the indentifier
-        size_t increment_id()
+        size_t incrementId()
         {
             next_id = (next_id + 1) % num_channels;
             return next_id;
         }
 
         // Get next id of a channel
-        size_t get_next_id()
+        size_t getNextId()
         {
             return next_id;
         }
@@ -196,7 +196,7 @@ private:
         }
 
         // Update maximum watermarks of a channel
-        void update_ch_maxs(size_t id, uint64_t wm)
+        void updateMaxs(size_t id, uint64_t wm)
         {
             assert(id < num_channels); // sanity check
             assert(ch_maxs[id] <= wm); // sanity check
@@ -204,7 +204,7 @@ private:
         }
 
         // Disable a channel
-        void disable_channel(size_t id)
+        void disableChannel(size_t id)
         {
             assert(id < num_channels); // sanity check
             ch_enabled[id] = false;
@@ -280,7 +280,7 @@ private:
     inline void hybrid_setup_tuple(Key_Dispatcher &key_d, in_t _in, size_t _source_id)
     {
         uint64_t min_wm = getMinimumWM();
-        key_d.update_ch_maxs(_source_id, _in->getWatermark(id_collector));
+        key_d.updateMaxs(_source_id, _in->getWatermark(id_collector));
         _in->setWatermark(min_wm, id_collector);
         _in->setStreamTag(_source_id < separator_id ? Join_Stream_t::A : Join_Stream_t::B);
     }
@@ -426,7 +426,7 @@ public:
                 key_dispatcherMap.insert(std::make_pair(key, Key_Dispatcher(this->get_num_inchannels(), input_batching, id_collector)));
             }
             auto &key_d = key_dispatcherMap.at(key);
-            id = channel_ids[key_d.get_next_id()];
+            id = channel_ids[key_d.getNextId()];
             if (source_id != id) {
                 key_d.push(source_id, input);
                 return;
@@ -442,13 +442,13 @@ public:
                 hybrid_setup_tuple(key_d, input, id);
                 this->ff_send_out(input);
             }
-            id = channel_ids[key_d.increment_id()];
+            id = channel_ids[key_d.incrementId()];
             while (!key_d.empty(id)) {
                 input = reinterpret_cast<Single_t<tuple_t> *>(key_d.front(id));
                 hybrid_setup_tuple(key_d, input, id);
                 key_d.pop(id);
                 this->ff_send_out(input);
-                id = channel_ids[key_d.increment_id()];
+                id = channel_ids[key_d.incrementId()];
             }
         }
         else {
@@ -458,7 +458,7 @@ public:
                 key_dispatcherMap.insert(std::make_pair(key, Key_Dispatcher(this->get_num_inchannels(), input_batching, id_collector)));
             }
             auto &key_d = key_dispatcherMap.at(key);
-            id = channel_ids[key_d.get_next_id()];
+            id = channel_ids[key_d.getNextId()];
             if (source_id != id) {
                 key_d.push(source_id, batch_input);
                 return;
@@ -474,13 +474,13 @@ public:
                 hybrid_setup_tuple(key_d, batch_input, id);
                 this->ff_send_out(batch_input);
             }
-            id = channel_ids[key_d.increment_id()];
+            id = channel_ids[key_d.incrementId()];
             while (!key_d.empty(id)) {
                 batch_input = reinterpret_cast<Batch_t<tuple_t> *>(key_d.front(id));
                 hybrid_setup_tuple(key_d, batch_input, id);
                 key_d.pop(id);
                 this->ff_send_out(batch_input);
-                id = channel_ids[key_d.increment_id()];
+                id = channel_ids[key_d.incrementId()];
             }
         }
     }
@@ -494,7 +494,7 @@ public:
         if (interval_join_mode == Join_Mode_t::HP) {
             for (auto &k: key_dispatcherMap) {
                 Key_Dispatcher &key_d = (k.second);
-                key_d.disable_channel(id);
+                key_d.disableChannel(id);
             }
         }
         if (eos_received != this->get_num_inchannels()) { // check the number of received EOS messages
@@ -517,7 +517,7 @@ public:
                         it = key_dispatcherMap.erase(it);
                         continue;
                     }
-                    id = channel_ids[key_d.get_next_id()];
+                    id = channel_ids[key_d.getNextId()];
                     while(key_total_size > 0) {
                         if (!key_d.empty(id)) {
                             if (!input_batching) {
@@ -535,7 +535,7 @@ public:
                             key_total_size--;
                             total_size--;
                         }
-                        id = channel_ids[key_d.increment_id()];
+                        id = channel_ids[key_d.incrementId()];
                     }
                     it = key_dispatcherMap.erase(it);
                 }
