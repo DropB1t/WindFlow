@@ -386,7 +386,6 @@ public:
                             emit_ts = win.getResultTimestamp();
                             if (join_mode == Join_Mode_t::HP) {
                                 emit_wm = std::min_element(last_wms.begin(), last_wms.end(), [](const auto &p1, const auto &p2) {
-                                    std::cout << "Comparing " << p1.second << " and " << p2.second << std::endl;
                                     return p1.second < p2.second;
                                 })->second;
                             } else {

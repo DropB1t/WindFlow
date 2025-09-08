@@ -130,7 +130,6 @@ private:
         void pop(size_t id)
         {
             assert(id < num_channels); // sanity check
-            //uint64_t pop_wm = getQueueWatermark(id);
             key_channelMap[id].pop();
         }
 
@@ -208,7 +207,6 @@ private:
         void disable_channel(size_t id)
         {
             assert(id < num_channels); // sanity check
-            //uint64_t old_max_wm = ch_maxs[id];
             ch_enabled[id] = false;
         }
 
@@ -281,9 +279,8 @@ private:
     template<typename in_t>
     inline void hybrid_setup_tuple(Key_Dispatcher &key_d, in_t _in, size_t _source_id)
     {
-        uint64_t min_wm = key_d.getMinWM();
-        uint64_t wm = _in->getWatermark(id_collector);
-        key_d.update_ch_maxs(_source_id, wm);
+        uint64_t min_wm = getMinimumWM();
+        key_d.update_ch_maxs(_source_id, _in->getWatermark(id_collector));
         _in->setWatermark(min_wm, id_collector);
         _in->setStreamTag(_source_id < separator_id ? Join_Stream_t::A : Join_Stream_t::B);
     }
@@ -517,7 +514,7 @@ public:
                     Key_Dispatcher &key_d = (it->second);
                     size_t key_total_size = key_d.totalQueueSize();
                     if (key_total_size == 0) {
-                        ++it;
+                        it = key_dispatcherMap.erase(it);
                         continue;
                     }
                     id = channel_ids[key_d.get_next_id()];
