@@ -437,7 +437,7 @@ public:
                 if ((join_mode == Join_Mode_t::HP && this->execution_mode == Execution_Mode_t::DEFAULT && win.getResultTimestamp() <= last_wms[key]) ||
                     (join_mode != Join_Mode_t::HP && win.getResultTimestamp() <= last_wm)) {
                     cnt_fired++;
-                    purge_wm = win.getResultTimestamp();
+                    purge_wm = join_win_type == Join_Window_t::TUMB ? win.getResultTimestamp() : win.getStartTimestamp();
                     key_d.last_lwid++;
                 }
             }

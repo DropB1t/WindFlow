@@ -284,6 +284,11 @@ public:
         return win_end_ts;
     }
 
+    uint64_t getStartTimestamp() const
+    {
+        return win_start_ts;
+    }
+
 };
 
 } // namespace wf
