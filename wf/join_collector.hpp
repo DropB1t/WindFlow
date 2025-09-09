@@ -81,9 +81,7 @@ private:
         size_t id_collector; // identifier of the Join_Collector
         size_t num_channels; // number of input channels
         size_t next_id; // next index, for channel_ids vector of a specific key, which will be used to select the next channel to forward the output from
-        uint64_t min_ch_wm; // minimum watermark among the enabled channels of a specific key
-        uint64_t min_queue_wm; // minimum watermark among all tuples queues of a specific key
-        bool queues_empty; // true if all the queues of the key dispatcher are empty, false otherwise
+        size_t total_queued; // total number of tuples queued in the queues of a specific key
         std::vector<std::queue<void *>> key_channelMap; // vector of tuples queues of a specific key for each channel
         std::vector<uint64_t> ch_maxs; // vector of the highest watermarks received from each channel of a specific key
         std::vector<bool> ch_enabled; // vector of booleans indicating if a channel is enabled or not
@@ -93,9 +91,7 @@ private:
                        input_batching(_input_batching),
                        id_collector(_id_collector),
                        num_channels(_num_channels),
-                       min_ch_wm(0),
-                       min_queue_wm(0),
-                       queues_empty(true),
+                       total_queued(0),
                        next_id(0),
                        key_channelMap(_num_channels),
                        ch_maxs(_num_channels),
@@ -124,6 +120,7 @@ private:
         {
             assert(id < num_channels); // sanity check
             key_channelMap[id].push(tuple);
+            total_queued++;
         }
 
         // Pop a tuple/batch from a queue
@@ -131,6 +128,7 @@ private:
         {
             assert(id < num_channels); // sanity check
             key_channelMap[id].pop();
+            total_queued--;
         }
 
         // Get a tuple/batch at the beginning of a queue
@@ -150,11 +148,7 @@ private:
         // Get total size of the queues
         size_t totalQueueSize()
         {
-            size_t total_size = 0;
-            for(size_t i=0; i<num_channels; i++) {
-                total_size += key_channelMap[i].size();
-            }
-            return total_size;
+            return total_queued;
         }
 
         // Increment the indentifier
@@ -173,25 +167,16 @@ private:
         // Get minimum watermark
         uint64_t getMinWM()
         {
-            uint64_t min_wm;
-            bool first = true;
+            uint64_t min_wm = std::numeric_limits<uint64_t>::max();
             for (size_t i=0; i<num_channels; i++) {
-                if (!key_channelMap[i].empty() && first) {
-                    min_wm = getQueueWatermark(i);
-                    first = false;
-                }
-                else if (ch_enabled[i] && first) {
-                    min_wm = ch_maxs[i];
-                    first = false;
-                }
-                else if (!key_channelMap[i].empty() && (getQueueWatermark(i) < min_wm)) {
+                if (!key_channelMap[i].empty() && (getQueueWatermark(i) < min_wm)) {
                     min_wm = getQueueWatermark(i);
                 }
                 else if (ch_enabled[i] && (ch_maxs[i] < min_wm)) {
                     min_wm = ch_maxs[i];
                 }
             }
-            assert(first == false); // sanity check
+            assert(min_wm != std::numeric_limits<uint64_t>::max());
             return min_wm;
         }
 
@@ -502,21 +487,24 @@ public:
         }
         if (interval_join_mode == Join_Mode_t::HP) {
             size_t total_size = 0;
-            for (auto &k: key_dispatcherMap) {
-                Key_Dispatcher &key_d = (k.second);
-                total_size += key_d.totalQueueSize();
+            // Sum up the total size of all the queues of all the keys and remove empty key dispatchers
+            for (auto it = key_dispatcherMap.begin(); it != key_dispatcherMap.end();) {
+                Key_Dispatcher &key_d = (it->second);
+                size_t kd_size = key_d.totalQueueSize();
+                if (kd_size == 0) {
+                    it = key_dispatcherMap.erase(it);
+                } else {
+                    total_size += kd_size;
+                    ++it;
+                }
             }
             if (total_size == 0) {
                 return;
             }
             while (total_size > 0) {
-                for (auto it = key_dispatcherMap.begin(); it != key_dispatcherMap.end(); ) {
+                for (auto it = key_dispatcherMap.begin(); it != key_dispatcherMap.end();) {
                     Key_Dispatcher &key_d = (it->second);
                     size_t key_total_size = key_d.totalQueueSize();
-                    if (key_total_size == 0) {
-                        it = key_dispatcherMap.erase(it);
-                        continue;
-                    }
                     id = channel_ids[key_d.getNextId()];
                     while(key_total_size > 0) {
                         if (!key_d.empty(id)) {
