@@ -348,7 +348,23 @@ public:
         std::vector<win_t> &wins = key_d.wins; // reference to the open windows of the key id_inner, key_d.assigned_replicas
         for (long lwid = key_d.next_lwid; lwid <= last_w; lwid++) { // create all the new opened windows
             uint64_t gwid = (lwid * num_replicas); // translate lwid -> gwid
-            wins.push_back(win_t(key, lwid, gwid, win_len, slide_len, Win_Type_t::TB, id_inner, key_d.assigned_replicas, Triggerer_Join_TB(win_len, slide_len, lwid)));
+            // Calculate the actual window length for this specific window
+            uint64_t actual_win_len;
+            if (win_len >= slide_len) {
+                // For the first few windows, use growing window size
+                uint64_t full_windows_threshold = win_len / slide_len; // Number of slides to reach full window size
+                if (lwid < full_windows_threshold) {
+                    // Growing window: window i has length (i+1) * slide_len
+                    actual_win_len = (lwid + 1) * slide_len;
+                } else {
+                    // Full-size window
+                    actual_win_len = win_len;
+                }
+            } else {
+                // Hopping windows - use full window length
+                actual_win_len = win_len;
+            }
+            wins.push_back(win_t(key, lwid, gwid, actual_win_len, slide_len, Win_Type_t::TB, id_inner, key_d.assigned_replicas, Triggerer_Join_TB(actual_win_len, slide_len, lwid)));
             key_d.next_lwid++;
         }
         
