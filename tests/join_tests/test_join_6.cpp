@@ -100,8 +100,8 @@ int main(int argc, char *argv[])
     std::uniform_int_distribution<std::mt19937::result_type> dist_p(min, max);
     std::uniform_int_distribution<std::mt19937::result_type> dist_b(0, 10);
     int map1_degree, map2_degree, filter_degree, sink1_degree, sink2_degree;
-    size_t source1_degree = 1; dist_p(rng);
-    size_t source2_degree = 1; dist_p(rng);
+    size_t source1_degree = dist_p(rng);
+    size_t source2_degree = dist_p(rng);
     long last_result = 0;
     // executes the runs in DEFAULT mode
     for (size_t i=0; i<runs; i++) {
@@ -229,6 +229,7 @@ int main(int argc, char *argv[])
             }
             else {
                 cout << "Result is --> " << RED << "FAILED" << DEFAULT_COLOR << " value " << global_sum.load() << endl;
+                abort();
             }
         }
         global_sum = 0;
