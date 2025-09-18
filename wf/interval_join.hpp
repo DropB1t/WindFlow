@@ -132,6 +132,7 @@ private:
     Join_Mode_t join_mode; // Interval Join operating mode
     std::unordered_map<key_t, Key_Descriptor> keyMap; // hash table that maps a descriptor for each key
     uint64_t last_wm; // last received watermark or timestamp
+    uint64_t last_sent_wm = 0;
     std::unordered_map<key_t, uint64_t> last_wms; // last watermark received for each key, used in Hybrid Parallelism
     size_t id_inner; // id_inner value
     size_t num_inner; // num_inner value
@@ -387,13 +388,17 @@ public:
             if (output) {
                 // use the highest timestamp between two joined tuples
                 uint64_t ts = (_timestamp >= interval.index_at(i)) ? _timestamp : interval.index_at(i);
-                uint64_t wm = _watermark;
+                uint64_t wm;
                 if (join_mode == Join_Mode_t::HP) {
                     wm = std::min_element(last_wms.begin(), last_wms.end(), [](const auto &p1, const auto &p2) {
                         return p1.second < p2.second;
                     })->second;
+                } else {
+                    wm = _watermark;
                 }
+                assert(last_sent_wm <= wm);
                 this->doEmit(this->emitter, &(*output), 0, ts, wm, this);
+                last_sent_wm = wm;
 #if defined (WF_TRACING_ENABLED)
                 (this->stats_record).outputs_sent++;
                 (this->stats_record).bytes_sent += sizeof(result_t);
