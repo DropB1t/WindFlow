@@ -202,6 +202,7 @@ public:
                   compare_func(_other.compare_func),
                   win_len(_other.win_len),
                   slide_len(_other.slide_len),
+                  join_win_type(_other.join_win_type),
                   join_mode(_other.join_mode),
                   last_wm(_other.last_wm),
                   ignored_tuples(_other.ignored_tuples),
@@ -344,27 +345,34 @@ public:
             uint64_t n = floor((double) (ts) / slide_len);
             last_w = n;
         }
-
         std::vector<win_t> &wins = key_d.wins; // reference to the open windows of the key id_inner, key_d.assigned_replicas
         for (long lwid = key_d.next_lwid; lwid <= last_w; lwid++) { // create all the new opened windows
-            uint64_t gwid = (lwid * num_replicas); // translate lwid -> gwid
+            uint64_t gwid = (lwid * num_replicas); // translate lwid -> gwid, in a window join operator logic the gwid is not used
+            if (join_win_type == Join_Window_t::SLIDE) {
             // Calculate the actual window length for this specific window
-            uint64_t actual_win_len;
+                uint64_t slide_lwid, slide_win_len;
             if (win_len >= slide_len) {
                 // For the first few windows, use growing window size
-                uint64_t full_windows_threshold = win_len / slide_len; // Number of slides to reach full window size
+                    uint64_t full_windows_threshold = ceil((double)win_len / slide_len) - 1; // Number of slides to reach full window size
                 if (lwid < full_windows_threshold) {
                     // Growing window: window i has length (i+1) * slide_len
-                    actual_win_len = (lwid + 1) * slide_len;
+                        slide_win_len = (lwid + 1) * slide_len;
+                        slide_lwid = 0;
+                    } else {
+                        // Full-size window
+                        slide_win_len = win_len;
+                        slide_lwid = lwid - full_windows_threshold;
+                    }
+                    std::cout << "Growing window lwid=" << lwid << " actual_win_len=" << slide_win_len << std::endl;
                 } else {
-                    // Full-size window
-                    actual_win_len = win_len;
+                    // Hopping windows - use full window length
+                    slide_win_len = win_len;
+                    slide_lwid = lwid;
                 }
+                wins.push_back(win_t(key, slide_lwid, gwid, slide_win_len, slide_len, Win_Type_t::TB, id_inner, key_d.assigned_replicas, Triggerer_Join_TB(slide_win_len, slide_len, slide_lwid)));
             } else {
-                // Hopping windows - use full window length
-                actual_win_len = win_len;
+                wins.push_back(win_t(key, lwid, gwid, win_len, slide_len, Win_Type_t::TB, id_inner, key_d.assigned_replicas, Triggerer_Join_TB(win_len, slide_len, lwid)));
             }
-            wins.push_back(win_t(key, lwid, gwid, actual_win_len, slide_len, Win_Type_t::TB, id_inner, key_d.assigned_replicas, Triggerer_Join_TB(actual_win_len, slide_len, lwid)));
             key_d.next_lwid++;
         }
         
