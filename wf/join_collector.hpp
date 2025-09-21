@@ -446,24 +446,7 @@ public:
             id = channel_ids[key_d.getNextId()];
             if (source_id != id) {
                 key_d.push(source_id, batch_input);
-                bool sendout = false;
-                for (auto& [k, kd] : key_dispatcherMap) {
-                    if (k == key) {
-                        continue; // skip the key of the true input tuple
-                    }
-                    id = channel_ids[kd.getNextId()];
-                    if(source_id == id && !kd.empty(id)) {
-                        batch_input = reinterpret_cast<Batch_t<tuple_t> *>(kd.front(id));
-                        hybrid_setup_tuple(kd, batch_input, id);
-                        kd.pop(id);
-                        this->ff_send_out(batch_input);
-                        key_d = kd;
-                        sendout = true;
-                    } else {
-                        sendout = false;
-                    }
-                }
-                if (!sendout) return;
+                return;
             }
             else if (!key_d.empty(id)) {
                 key_d.push(source_id, batch_input);

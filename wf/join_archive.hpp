@@ -125,7 +125,7 @@ class Triggerer_Join_TB {
 private:
     uint64_t win_len;
     uint64_t slide_len;
-    uint64_t lwid;
+    long lwid;
     
 public:
     Triggerer_Join_TB(uint64_t _win_len,
@@ -136,7 +136,7 @@ public:
                               lwid(_lwid) {}
 
     win_event_t operator()(uint64_t _ts) const {
-        uint64_t window_start = lwid * slide_len;
+        uint64_t window_start = lwid < 0 ? 0 : lwid * slide_len;
         uint64_t window_end = window_start + win_len;
         
         // Check if tuple is within the overall window
@@ -159,7 +159,7 @@ class JoinWindow
 private:
     using triggerer_t = std::function<win_event_t(uint64_t)>; // triggerer type of the window
     key_t key; // key attribute of the window
-    uint64_t lwid; // local identifier of the window (starting from zero)
+    long lwid; // local identifier of the window (starting from zero)
     uint64_t gwid; // global identifier of the window (starting from zero)
     triggerer_t triggerer; // triggerer used by the window
     Win_Type_t winType; // type of the window (CB or TB)
@@ -185,7 +185,7 @@ private:
 public:
     // Constructor 
     JoinWindow(key_t _key,
-                uint64_t _lwid,
+                long _lwid,
                 uint64_t _gwid,
                 uint64_t _win_len,
                 uint64_t _slide_len,
@@ -206,7 +206,7 @@ public:
             win_start_ts = 0;
             win_end_ts = 0;
         } else {
-            win_start_ts = _lwid * _slide_len; // TB windows have a start timestamp
+            win_start_ts = _lwid < 0 ? 0 : _lwid * _slide_len; // TB windows have a start timestamp
             win_end_ts = win_start_ts + _win_len - 1; // set the result timestamp
 
             // Find logical index of this physical replica
@@ -225,11 +225,11 @@ public:
             partition_length = base_partition_length;
             
             if (logical_replica_index < remainder) {
-                // This logical replica gets +1 bonus
+                // Distribute +1 remainder among replicas 
                 partition_length++;
                 partition_start_offset = logical_replica_index * partition_length;
             } else {
-                // This logical replica gets base partition
+                // Base partition length
                 partition_start_offset = logical_replica_index * partition_length + remainder;
             }
 
@@ -261,7 +261,7 @@ public:
     }
 
     // Get the local window identifier
-    uint64_t getLWID() const
+    long getLWID() const
     {
         return lwid;
     }

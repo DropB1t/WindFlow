@@ -109,6 +109,7 @@ private:
 
     uint64_t win_len; // window size expressed in time unit
     uint64_t slide_len; // sliding length expressed in time unit
+    uint64_t growing_lwid_num; // number of slides to reach full window size
 
     Join_Window_t join_win_type; // type of the window join
     Join_Mode_t join_mode; // Interval Join operating mode
@@ -192,6 +193,9 @@ public:
         } else {
             num_replicas = 1;
         }
+        if(join_win_type == Join_Window_t::SLIDE && win_len >= slide_len) {
+            growing_lwid_num = ceil((double)win_len / slide_len) - 1; // Number of slides to reach full window size
+        }
     }
 
     // Copy Constructor
@@ -202,6 +206,7 @@ public:
                   compare_func(_other.compare_func),
                   win_len(_other.win_len),
                   slide_len(_other.slide_len),
+                  growing_lwid_num(_other.growing_lwid_num),
                   join_win_type(_other.join_win_type),
                   join_mode(_other.join_mode),
                   last_wm(_other.last_wm),
@@ -316,7 +321,10 @@ public:
                 assigned_replicas.push_back(id_inner);
             }
             (it->second).assigned_replicas = assigned_replicas;
-
+            if (join_win_type == Join_Window_t::SLIDE && win_len >= slide_len) {
+                (it->second).next_lwid = -growing_lwid_num;
+                (it->second).last_lwid = -growing_lwid_num;
+            }
         }
         key_d_t &key_d = (*it).second;
         
@@ -326,7 +334,13 @@ public:
             num_replicas = keyToJoiners[key].size();
         }
         
-        uint64_t min_boundary = (key_d.last_lwid >= 0) ? win_len + (key_d.last_lwid  * slide_len) : 0;
+        uint64_t min_boundary;
+        if (join_win_type == Join_Window_t::SLIDE) {
+            min_boundary = (key_d.last_lwid >= 0) ? (key_d.last_lwid  * slide_len) : 0;
+        } else {
+            min_boundary = (key_d.last_lwid >= 0) ? win_len + (key_d.last_lwid  * slide_len) : 0;
+        }
+
         if (ts < min_boundary) { // if the tuple is related to a closed window -> IGNORED
             if (key_d.last_lwid >= 0) {
 #if defined (WF_TRACING_ENABLED)
@@ -349,27 +363,13 @@ public:
         for (long lwid = key_d.next_lwid; lwid <= last_w; lwid++) { // create all the new opened windows
             uint64_t gwid = (lwid * num_replicas); // translate lwid -> gwid, in a window join operator logic the gwid is not used
             if (join_win_type == Join_Window_t::SLIDE) {
-            // Calculate the actual window length for this specific window
-                uint64_t slide_lwid, slide_win_len;
-            if (win_len >= slide_len) {
-                // For the first few windows, use growing window size
-                    uint64_t full_windows_threshold = ceil((double)win_len / slide_len) - 1; // Number of slides to reach full window size
-                if (lwid < full_windows_threshold) {
-                    // Growing window: window i has length (i+1) * slide_len
-                        slide_win_len = (lwid + 1) * slide_len;
-                        slide_lwid = 0;
-                    } else {
-                        // Full-size window
-                        slide_win_len = win_len;
-                        slide_lwid = lwid - full_windows_threshold;
-                    }
-                    std::cout << "Growing window lwid=" << lwid << " actual_win_len=" << slide_win_len << std::endl;
-                } else {
-                    // Hopping windows - use full window length
+                uint64_t slide_win_len;
+                if (lwid < 0) { // Calculate the actual window length for partial / growing window
+                    slide_win_len = (lwid + growing_lwid_num + 1) * slide_len;
+                } else { // After a growing_lwid_num use full window length
                     slide_win_len = win_len;
-                    slide_lwid = lwid;
                 }
-                wins.push_back(win_t(key, slide_lwid, gwid, slide_win_len, slide_len, Win_Type_t::TB, id_inner, key_d.assigned_replicas, Triggerer_Join_TB(slide_win_len, slide_len, slide_lwid)));
+                wins.push_back(win_t(key, lwid, gwid, slide_win_len, slide_len, Win_Type_t::TB, id_inner, key_d.assigned_replicas, Triggerer_Join_TB(slide_win_len, slide_len, lwid)));
             } else {
                 wins.push_back(win_t(key, lwid, gwid, win_len, slide_len, Win_Type_t::TB, id_inner, key_d.assigned_replicas, Triggerer_Join_TB(win_len, slide_len, lwid)));
             }
@@ -395,19 +395,23 @@ public:
                     std::pair<iterator_t, iterator_t> its;
                     its = (key_d.archiveB).getJoinRange(bound_pair.first, bound_pair.second);
                     Iterable<tuple_t> iter_b(its.first, its.second);
-                    /* std::cout << "Window event IN: " << win.getLWID() << " with win num_tuples: " << win.getSize() <<
-                        " and win ts: " << win.getResultTimestamp() << " and wm: " << last_wm <<
-                        " with B size: " << iter_b.size() << " from replica: " << id_inner << " tuple ts: " << ts << std::endl; */
-                    for (auto &t_b: iter_b) { // iterate over the tuples in the archive of stream B
+                    /* std::cout << "Window event IN: " << win.getLWID() << " tuple (ts: " << ts << ") of Stream A joining with: " << iter_b.size() <<
+                        " tuples with window bounds: [" << bound_pair.first << " , " << bound_pair.second <<
+                        " ] " << " from replica: " << id_inner << std::endl; */
+                    for (size_t i=0; i<iter_b.size(); i++) { // iterate over the tuples in the archive of stream B
                         if constexpr (isNonRiched) {
-                            output = func(_tuple, t_b);
+                            output = func(_tuple, iter_b.at(i));
                         }
                         if constexpr (isRiched)  { // inplace riched version
                             (this->context).setContextParameters(ts, _watermark);
-                            output = func(_tuple, t_b, this->context);
+                            output = func(_tuple, iter_b.at(i), this->context);
                         }
                         if (output) {
-                            emit_ts = win.getResultTimestamp();
+                            if (this->execution_mode == Execution_Mode_t::DETERMINISTIC) {
+                                emit_ts = (ts >= iter_b.index_at(i)) ? ts : iter_b.index_at(i);
+                            } else {
+                                emit_ts = win.getResultTimestamp();
+                            }
                             if (join_mode == Join_Mode_t::HP) {
                                 emit_wm = std::min_element(last_wms.begin(), last_wms.end(), [](const auto &p1, const auto &p2) {
                                     return p1.second < p2.second;
@@ -426,19 +430,23 @@ public:
                     std::pair<iterator_t, iterator_t> its;
                     its = (key_d.archiveA).getJoinRange(bound_pair.first, bound_pair.second);
                     Iterable<tuple_t> iter_a(its.first, its.second);
-                    /* std::cout << "Window event IN: " << win.getLWID() << " with win num_tuples: " << win.getSize() <<
-                        " and win ts: " << win.getResultTimestamp() << " and wm: " << last_wm <<
-                        " with A size: " << iter_a.size() << " from replica: " << id_inner << " tuple ts: " << ts << std::endl; */
-                    for (auto &t_a: iter_a) { // iterate over the tuples in the archive of stream A
+                    /* std::cout << "Window event IN: " << win.getLWID() << " tuple (ts: " << ts << ") of Stream B joining with: " << iter_a.size() <<
+                        " tuples with window bounds: [" << bound_pair.first << " , " << bound_pair.second <<
+                        "] " << " from replica: " << id_inner << std::endl; */
+                    for (size_t i=0; i<iter_a.size(); i++) { // iterate over the tuples in the archive of stream A
                         if constexpr (isNonRiched) {
-                            output = func(t_a, _tuple);
+                            output = func(iter_a.at(i), _tuple);
                         }
                          if constexpr (isRiched)  { // inplace riched version
                             (this->context).setContextParameters(ts, _watermark);
-                            output = func(t_a, _tuple, this->context);
+                            output = func(iter_a.at(i), _tuple, this->context);
                         }
                         if (output) {
-                            emit_ts = win.getResultTimestamp();
+                            if (this->execution_mode == Execution_Mode_t::DETERMINISTIC) {
+                                emit_ts = (ts >= iter_a.index_at(i)) ? ts : iter_a.index_at(i);
+                            } else {
+                                emit_ts = win.getResultTimestamp();
+                            }
                             if (join_mode == Join_Mode_t::HP) {
                                 emit_wm = std::min_element(last_wms.begin(), last_wms.end(), [](const auto &p1, const auto &p2) {
                                     return p1.second < p2.second;
@@ -458,18 +466,18 @@ public:
             }
             else if (event == win_event_t::FIRED) { // window is fired
                 // TODO: Second condition could involve lateness
-                if ((join_mode == Join_Mode_t::HP && this->execution_mode == Execution_Mode_t::DEFAULT && win.getResultTimestamp() <= last_wms[key]) ||
-                    (join_mode != Join_Mode_t::HP && win.getResultTimestamp() <= last_wm)) {
+                if ((join_mode == Join_Mode_t::HP && this->execution_mode == Execution_Mode_t::DEFAULT && win.getResultTimestamp() < last_wms[key]) ||
+                    (join_mode != Join_Mode_t::HP && win.getResultTimestamp() < last_wm)) {
                     cnt_fired++;
-                    purge_wm = join_win_type == Join_Window_t::TUMB ? win.getResultTimestamp() : win.getStartTimestamp();
                     key_d.last_lwid++;
+                    purge_wm = join_win_type == Join_Window_t::SLIDE ? win.getStartTimestamp() : win.getResultTimestamp();
                 }
             }
         }
+
         if (cnt_fired) {
-            wins.erase(wins.begin(), wins.begin() + cnt_fired); // purge the fired windows
-            purgeArchives(key_d, purge_wm); // purge the archives using the watermark of the last fired window
-            //std::cout << "Purged " << cnt_fired << " windows from key: " << key << " in replica: " << id_inner << std::endl;
+            wins.erase(wins.begin(), wins.begin() + cnt_fired);
+            purgeArchives(key_d, purge_wm);
         }
 
         if (join_mode == Join_Mode_t::KP) { // KP
@@ -477,7 +485,6 @@ public:
         }
 
         if (should_store_tuple) {
-            //std::cout << "Storing tuple in DP mode with id_inner: " << id_inner << " stream: " << (_tag == Join_Stream_t::A ? "A" : "B") << std::endl;
             insertIntoBuffer(key_d, wrapper_t(_tuple, _timestamp), _tag);
         }
 
