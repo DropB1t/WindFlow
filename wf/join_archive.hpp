@@ -167,38 +167,30 @@ private:
     
     uint64_t win_end_ts; // timestamp of the window result (upper bound of the window)
     uint64_t win_start_ts; // timestamp of start of the window (lower bound of the window, only for TB windows)
-    uint64_t partition_start_offset;
-    uint64_t partition_length;
 
-    size_t logical_replica_index;     // Position in the assigned_replicas vector (0, 1, 2, ...)
-    size_t physical_replica_id;       // Actual replica ID (could be 1, 4, 7, ...)
-    size_t num_assigned_replicas;     // Number of replicas assigned to this key
+    size_t replica_id;       // Actual replica ID (could be 1, 4, 7, ...)
 
     // Debug info
     void print_partition_info() const {
-        printf("Physical replica %lu (logical index %lu/%lu): partition [%lu, %lu) length=%lu\n",
-               physical_replica_id, (logical_replica_index+1), num_assigned_replicas,
-               win_start_ts + partition_start_offset, win_start_ts + partition_start_offset + partition_length, 
-               partition_length);
+        printf("Replica id %lu : window [%lu, %lu) length=%lu\n",
+                replica_id,
+                win_start_ts, win_end_ts, 
+                win_end_ts - win_start_ts);
     }
 
 public:
     // Constructor 
     JoinWindow(key_t _key,
                 long _lwid,
-                uint64_t _gwid,
                 uint64_t _win_len,
                 uint64_t _slide_len,
                 Win_Type_t _winType,
-                size_t _physical_replica_id,
-                const std::vector<int>& _assigned_replicas,
+                size_t _replica_id,
                 triggerer_t _triggerer):
             key(_key),
             lwid(_lwid),
-            gwid(_gwid),
             winType(_winType),
-            physical_replica_id(_physical_replica_id),
-            num_assigned_replicas(_assigned_replicas.size()),
+            replica_id(_replica_id),
             triggerer(_triggerer),
             num_tuples(0)
     {
@@ -208,31 +200,6 @@ public:
         } else {
             win_start_ts = _lwid < 0 ? 0 : _lwid * _slide_len; // TB windows have a start timestamp
             win_end_ts = win_start_ts + _win_len - 1; // set the result timestamp
-
-            // Find logical index of this physical replica
-            logical_replica_index = std::find(_assigned_replicas.begin(), 
-                                            _assigned_replicas.end(), 
-                                            _physical_replica_id) - _assigned_replicas.begin();
-            
-            // Verify this replica is actually assigned to this key
-            assert(logical_replica_index < num_assigned_replicas && 
-                "Physical replica not found in assigned replicas list");
-            
-            // Calculate partition using LOGICAL indices (0, 1, 2, ...) not physical IDs
-            uint64_t base_partition_length = _win_len / num_assigned_replicas;
-            uint64_t remainder = _win_len % num_assigned_replicas;
-            
-            partition_length = base_partition_length;
-            
-            if (logical_replica_index < remainder) {
-                // Distribute +1 remainder among replicas 
-                partition_length++;
-                partition_start_offset = logical_replica_index * partition_length;
-            } else {
-                // Base partition length
-                partition_start_offset = logical_replica_index * partition_length + remainder;
-            }
-
             //print_partition_info();
         }
     }
@@ -249,9 +216,8 @@ public:
         return event;
     }
 
-    std::pair<uint64_t, uint64_t> getPartitionBounds() const {
-        return {win_start_ts + partition_start_offset, 
-                win_start_ts + partition_start_offset + partition_length};
+    std::pair<uint64_t, uint64_t> getWinBounds() const {
+        return {win_start_ts, win_end_ts};
     }
 
     // Get the key attribute of the window
@@ -264,12 +230,6 @@ public:
     long getLWID() const
     {
         return lwid;
-    }
-
-    // Get the global window identifier
-    uint64_t getGWID() const
-    {
-        return gwid;
     }
 
     // Get the number of tuples that raised a IN event

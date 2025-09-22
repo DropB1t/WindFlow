@@ -90,8 +90,6 @@ private:
         int64_t last_lwid; // last window closed of this key (lwid)
         uint64_t partitioning_counter; // counter used in DP/HP mode to establish which replica will save the given tuple
 
-        std::vector<int> assigned_replicas; // vector of replicas assigned to this key (used for window trigger initialization)
-
         // Constructor
         Key_Descriptor(compare_func_t _compare_func):
                        archiveA(_compare_func),
@@ -117,7 +115,6 @@ private:
     uint64_t last_wm; // last received watermark or timestamp
     size_t id_inner; // id_inner value
     size_t num_inner; // num_inner value
-    size_t num_replicas; // number of replicas of the operator used for window assignment
     
     size_t hybrid_degree; // hybrid degree of the emitter in case of hybrid parallelism
     std::unordered_map<key_t, std::vector<int>> keyToJoiners; // mapping keys to replicas
@@ -155,6 +152,13 @@ private:
         }
     }
 
+    // Compute index by using key hash and partitioning_counter (Alternative HP Version I)
+    size_t computeHashIndex(const key_t &key, uint64_t partitioning_counter)
+    {
+        size_t id_offset = std::hash<key_t>()(key) % num_inner;
+        return ((partitioning_counter % hybrid_degree) + id_offset) % num_inner;
+    }
+
 public:
     // Constructor
     WJoin_Replica(join_func_t _func,
@@ -185,14 +189,6 @@ public:
         };
         num_inner = _context.getParallelism();
         id_inner = _context.getReplicaIndex();
-        if (join_mode == Join_Mode_t::DP) {
-            num_replicas = num_inner;
-        } else if (join_mode == Join_Mode_t::HP && !keyToJoiners.size()) {
-            num_replicas = hybrid_degree;
-            assert(num_replicas <= num_inner);
-        } else {
-            num_replicas = 1;
-        }
         if(join_win_type == Join_Window_t::SLIDE && win_len >= slide_len) {
             growing_lwid_num = ceil((double)win_len / slide_len) - 1; // Number of slides to reach full window size
         }
@@ -302,25 +298,6 @@ public:
             auto p = keyMap.insert(std::make_pair(key, key_d_t(compare_func)));
             it = p.first;
             last_wms[key] = 0;
-
-            std::vector<int> assigned_replicas;
-            if (join_mode == Join_Mode_t::HP) {
-                if (keyToJoiners.count(key)) {
-                    assigned_replicas = keyToJoiners[key];
-                } else {
-                    size_t hashcode = std::hash<key_t>()(key);
-                    for (size_t i = 0; i < hybrid_degree; i++) {
-                        assigned_replicas.push_back((hashcode + i) % num_inner);
-                    }
-                }
-            } else if (join_mode == Join_Mode_t::DP) {
-                for (size_t i = 0; i < num_inner; i++) {
-                    assigned_replicas.push_back(i);  // Contiguous: [0, 1, 2, ..., num_inner-1]
-                }
-            } else {
-                assigned_replicas.push_back(id_inner);
-            }
-            (it->second).assigned_replicas = assigned_replicas;
             if (join_win_type == Join_Window_t::SLIDE && win_len >= slide_len) {
                 (it->second).next_lwid = -growing_lwid_num;
                 (it->second).last_lwid = -growing_lwid_num;
@@ -330,9 +307,6 @@ public:
         
         bool should_store_tuple = false;
         uint64_t ts = _timestamp; // the timestamp of the current tuple
-        if (join_mode == Join_Mode_t::HP && keyToJoiners.size()) {
-            num_replicas = keyToJoiners[key].size();
-        }
         
         uint64_t min_boundary;
         if (join_win_type == Join_Window_t::SLIDE) {
@@ -354,14 +328,12 @@ public:
         long last_w = -1; // determine the lwid of the last window containing t
         if (win_len >= slide_len) { // sliding or tumbling windows
             last_w = ceil(((double) ts + 1)/((double) slide_len)) - 1;
-        }
-        else { // hopping windows
+        } else { // hopping windows
             uint64_t n = floor((double) (ts) / slide_len);
             last_w = n;
         }
-        std::vector<win_t> &wins = key_d.wins; // reference to the open windows of the key id_inner, key_d.assigned_replicas
+        std::vector<win_t> &wins = key_d.wins; // reference to the open windows of the key id_inner
         for (long lwid = key_d.next_lwid; lwid <= last_w; lwid++) { // create all the new opened windows
-            uint64_t gwid = (lwid * num_replicas); // translate lwid -> gwid, in a window join operator logic the gwid is not used
             if (join_win_type == Join_Window_t::SLIDE) {
                 uint64_t slide_win_len;
                 if (lwid < 0) { // Calculate the actual window length for partial / growing window
@@ -369,9 +341,9 @@ public:
                 } else { // After a growing_lwid_num use full window length
                     slide_win_len = win_len;
                 }
-                wins.push_back(win_t(key, lwid, gwid, slide_win_len, slide_len, Win_Type_t::TB, id_inner, key_d.assigned_replicas, Triggerer_Join_TB(slide_win_len, slide_len, lwid)));
+                wins.push_back(win_t(key, lwid, slide_win_len, slide_len, Win_Type_t::TB, id_inner, Triggerer_Join_TB(slide_win_len, slide_len, lwid)));
             } else {
-                wins.push_back(win_t(key, lwid, gwid, win_len, slide_len, Win_Type_t::TB, id_inner, key_d.assigned_replicas, Triggerer_Join_TB(win_len, slide_len, lwid)));
+                wins.push_back(win_t(key, lwid, win_len, slide_len, Win_Type_t::TB, id_inner, Triggerer_Join_TB(win_len, slide_len, lwid)));
             }
             key_d.next_lwid++;
         }
@@ -384,13 +356,8 @@ public:
         for (win_t &win: wins) { // evaluate all the open windows of the key
             win_event_t event = win.onJoinTuple(ts, _tag); // get the event
             if (event == win_event_t::IN) { // window is not fired
-                auto bound_pair = win.getPartitionBounds();
+                auto bound_pair = win.getWinBounds();
                 // In DP check if the current tuple is in the time partition of the replica
-                if (join_mode == Join_Mode_t::DP || join_mode == Join_Mode_t::HP) {
-                    if ( bound_pair.first <= ts && ts < bound_pair.second ) {
-                        should_store_tuple = true;
-                    }
-                }
                 if (isStreamA(_tag)) {
                     std::pair<iterator_t, iterator_t> its;
                     its = (key_d.archiveB).getJoinRange(bound_pair.first, bound_pair.second);
@@ -416,6 +383,7 @@ public:
                                 emit_wm = std::min_element(last_wms.begin(), last_wms.end(), [](const auto &p1, const auto &p2) {
                                     return p1.second < p2.second;
                                 })->second;
+                                emit_wm = 0;
                             } else {
                                 emit_wm = _watermark;
                             }
@@ -437,7 +405,7 @@ public:
                         if constexpr (isNonRiched) {
                             output = func(iter_a.at(i), _tuple);
                         }
-                         if constexpr (isRiched)  { // inplace riched version
+                        if constexpr (isRiched)  { // inplace riched version
                             (this->context).setContextParameters(ts, _watermark);
                             output = func(iter_a.at(i), _tuple, this->context);
                         }
@@ -451,6 +419,7 @@ public:
                                 emit_wm = std::min_element(last_wms.begin(), last_wms.end(), [](const auto &p1, const auto &p2) {
                                     return p1.second < p2.second;
                                 })->second;
+                                emit_wm = 0;
                             } else {
                                 emit_wm = _watermark;
                             }
@@ -461,7 +430,6 @@ public:
 #endif
                         }
                     }
-
                 }
             }
             else if (event == win_event_t::FIRED) { // window is fired
@@ -482,6 +450,26 @@ public:
 
         if (join_mode == Join_Mode_t::KP) { // KP
             should_store_tuple = true;
+        } else { // DP or HP
+            key_d.partitioning_counter++;
+            if (join_mode == Join_Mode_t::DP) { // DP
+                if (key_d.partitioning_counter % num_inner == id_inner) {
+                    should_store_tuple = true;
+                }
+            }
+            else { // HP
+                if (keyToJoiners.size() == 0) { // HP (Version I)
+                    size_t hash_id = computeHashIndex(key, key_d.partitioning_counter);
+                    if (hash_id == id_inner) {
+                        should_store_tuple = true;
+                    }
+                }
+                else { // HP (Version II)
+                    if (keyToJoiners[key][key_d.partitioning_counter % keyToJoiners[key].size()] == id_inner) {
+                        should_store_tuple = true;
+                    }
+                }
+            }
         }
 
         if (should_store_tuple) {
