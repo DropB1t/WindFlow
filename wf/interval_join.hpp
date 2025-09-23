@@ -137,8 +137,8 @@ private:
     size_t id_inner; // id_inner value
     size_t num_inner; // num_inner value
     size_t hybrid_degree; // hybrid degree of the emitter in case of hybrid parallelism
-    size_t expected_keys;
-    size_t detected_keys;
+    size_t expected_keys; // expected number keys that should arrive to replica before start of watermark transmission, used in Hybrid Parallelism
+    size_t detected_keys; // currecntly detected number keys that should match the the number of expected keys
     std::unordered_map<key_t, std::vector<int>> keyToJoiners; // mapping keys to replicas
 
     // Checks if the given Join_Stream_t is Stream A
@@ -239,8 +239,7 @@ public:
                   int64_t _upper_bound,
                   Join_Mode_t _join_mode,
                   size_t _hybrid_degree,
-                  std::unordered_map<key_t, std::vector<int>> _keyToJoiners,
-                  size_t _expected_keys):
+                  std::unordered_map<key_t, std::vector<int>> _keyToJoiners):
                   Basic_Replica(_opName, _context, _closing_func, false),
                   func(_func),
                   key_extr(_key_extr),
@@ -260,16 +259,12 @@ public:
         };
         num_inner = _context.getParallelism();
         id_inner = _context.getReplicaIndex();
-        if (join_mode == Join_Mode_t::HP && !keyToJoiners.size()) {
-            expected_keys = _expected_keys;
-        } else if (join_mode == Join_Mode_t::HP) {
-            expected_keys = 0;
+        if (join_mode == Join_Mode_t::HP && keyToJoiners.size()) {
             for (auto& [key, id_vec]: keyToJoiners) {
                 if (std::find(id_vec.begin(), id_vec.end(), id_inner) != id_vec.end())
                     expected_keys++;
             }
         }
-        std::cout << "expected_keys: " << expected_keys << std::endl;
     }
 
     // Copy Constructor
@@ -408,9 +403,7 @@ public:
                 uint64_t ts = (_timestamp >= interval.index_at(i)) ? _timestamp : interval.index_at(i);
                 uint64_t wm;
                 if (join_mode == Join_Mode_t::HP) {
-                    //std::cout << "Detected keys: " << detected_keys << std::endl;
-                    if (detected_keys >= expected_keys) {
-                        //std::cout << "ALL KEYS ARRIVED" << std::endl;
+                    if (keyToJoiners.size() && detected_keys >= expected_keys) {
                         wm = std::min_element(last_wms.begin(), last_wms.end(), [](const auto &p1, const auto &p2) {
                             return p1.second < p2.second;
                         })->second;
@@ -691,8 +684,7 @@ public:
                   int64_t _upper_bound,
                   Join_Mode_t _join_mode,
                   size_t _hybrid_parallelism,
-                  const std::unordered_map<key_t, std::vector<int>> &_keyToJoiners,
-                  size_t _expected_keys):
+                  const std::unordered_map<key_t, std::vector<int>> &_keyToJoiners):
                   Basic_Operator(_parallelism, _name, _input_routing_mode, _outputBatchSize),
                   func(_func),
                   key_extr(_key_extr),
@@ -700,8 +692,7 @@ public:
                   upper_bound(_upper_bound),
                   join_mode(_join_mode),
                   hybrid_parallelism(_hybrid_parallelism),
-                  keyToJoiners(_keyToJoiners),
-                  expected_keys(_expected_keys)
+                  keyToJoiners(_keyToJoiners)
     {
         if (this->join_mode == Join_Mode_t::HP) {
             if (this->hybrid_parallelism > this->parallelism) {
@@ -719,8 +710,7 @@ public:
                                                                               this->upper_bound,
                                                                               this->join_mode,
                                                                               this->hybrid_parallelism,
-                                                                              this->keyToJoiners,
-                                                                              this->expected_keys));
+                                                                              this->keyToJoiners));
         }
     }
 
@@ -733,8 +723,7 @@ public:
                   upper_bound(_other.upper_bound),
                   join_mode(_other.join_mode),
                   hybrid_parallelism(_other.hybrid_parallelism),
-                  keyToJoiners(_other.keyToJoiners),
-                  expected_keys(_other.expected_keys)
+                  keyToJoiners(_other.keyToJoiners)
     {
         for (size_t i=0; i<this->parallelism; i++) { // deep copy of the pointers to the Interval Join replicas
             replicas.push_back(new IJoin_Replica<join_func_t, keyextr_func_t>(*(_other.replicas[i])));

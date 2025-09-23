@@ -1422,7 +1422,6 @@ private:
     int64_t upper_bound=0; // upper bound of the interval
     Join_Mode_t join_mode = Join_Mode_t::NONE;
     size_t hybrid_parallelism = 1; // parallelism of the hybrid partitioning mode
-    size_t expected_keys = 0;
     std::unordered_map<key_t, std::vector<int>> keyToJoiners; // mapping keys to replicas (used in hybrid mode only)
 
 public:
@@ -1542,7 +1541,7 @@ public:
      *  
      *  \return a reference to the builder object
      */ 
-    auto &withHPMode(size_t _hybrid_parallelism, size_t _expected_keys)
+    auto &withHPMode(size_t _hybrid_parallelism)
     {
         if (!isKeyBySet) {
             std::cerr << RED << "WindFlow Error: Interval_Join with hybrid parallelism mode requires a key extractor" << DEFAULT_COLOR << std::endl;
@@ -1552,12 +1551,7 @@ public:
             std::cerr << RED << "WindFlow Error: wrong use of withHPMode() in the Interval_Join_Builder, you can specify only one mode per join operator" << DEFAULT_COLOR << std::endl;
             exit(EXIT_FAILURE);
         }
-        if (!_expected_keys) {
-            std::cerr << RED << "WindFlow Error: Interval_Join cannot have expected_keys of size zero" << DEFAULT_COLOR << std::endl;
-            exit(EXIT_FAILURE);
-        }
         hybrid_parallelism = _hybrid_parallelism;
-        expected_keys = _expected_keys;
         input_routing_mode = Routing_Mode_t::HYBRID_JOIN;
         join_mode = Join_Mode_t::HP;
         return *this;
@@ -1614,8 +1608,7 @@ public:
                       upper_bound,
                       join_mode,
                       hybrid_parallelism,
-                      keyToJoiners,
-                      expected_keys);
+                      keyToJoiners);
     }
 };
 
