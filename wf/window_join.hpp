@@ -114,6 +114,8 @@ private:
     size_t hybrid_degree; // hybrid degree of the emitter in case of hybrid parallelism
     std::unordered_map<key_t, std::vector<int>> keyToJoiners; // mapping keys to replicas
     std::unordered_map<key_t, uint64_t> last_wms; // last watermark received for each key, used in Hybrid Parallelism
+    size_t expected_keys; // expected number keys that should arrive to replica before start of watermark transmission, used in Hybrid Parallelism
+    size_t detected_keys; // currecntly detected number keys that should match the the number of expected keys
 
     // Checks if the given Join_Stream_t is Stream A
     bool isStreamA(Join_Stream_t stream) const
@@ -150,30 +152,27 @@ private:
     void purgeArchives(key_d_t &_key_d, uint64_t _check_point)
     {
         if (_key_d.last_purged_wm < _check_point) {
-            size_t purged_a = (_key_d.archiveA).purge(_check_point);
-            size_t purged_b = (_key_d.archiveB).purge(_check_point);
+            (_key_d.archiveA).purge(_check_point);
+            (_key_d.archiveB).purge(_check_point);
             _key_d.last_purged_wm = _check_point;
-            //std::cout << "Purged " << purged_a << " tuples from A and " << purged_b << " tuples from B" << std::endl;
         }
     }
 
-    void purgeFiredWinTuples(key_d_t &_key_d, long _first_w) {
+    void purgeFiredWinTuples(key_d_t &_key_d, uint64_t _last_wm, long _first_w) {
         long first_w = _first_w;
-        uint64_t purge_wm = 0, win_start;
-        if (first_w > 2 && last_wm) {
-            win_start = first_w * slide_len;
-            purge_wm = win_start - slide_len;
-            size_t i = 0;
-            //std::cout << i++ << "] " << "pruge_wm: " << purge_wm << " last_wm: " << last_wm << std::endl;
-            while(purge_wm && purge_wm >= last_wm) {
-                if (purge_wm < win_len) {
-                    //std::cout << "purge_wm lesser that window_len" << std::endl;
-                }
+        uint64_t purge_wm = 0;
+        if (first_w > 0 && _last_wm) {
+            purge_wm = (first_w * slide_len) - slide_len;
+            while(purge_wm && purge_wm >= _last_wm) {
+                if (purge_wm < win_len) return;
                 purge_wm -= win_len;
-                first_w = win_len > slide_len ? ceil(((int64_t)purge_wm - (int64_t)win_len + 1) / (double)slide_len) : first_w = floor((double)(purge_wm)/slide_len);
-                win_start = first_w < 0 ? 0 : (first_w * slide_len);
-                purge_wm = win_start < slide_len ? 0 : win_start - slide_len;
-                //std::cout << i++ << "] " << "pruge_wm: " << purge_wm << " last_wm: " << last_wm << std::endl;
+                first_w = win_len > slide_len ? ceil(((int64_t)purge_wm - (int64_t)win_len + 1) / (double)slide_len)
+                                              : floor((double)(purge_wm)/slide_len);
+                if(first_w > 0)
+                    purge_wm = (first_w * slide_len) - slide_len;
+                else
+                    purge_wm = 0;
+                
             }
         }
 
@@ -181,8 +180,7 @@ private:
             purge_wm = purge_wm < win_len ? 0 : purge_wm - win_len;
         }
         
-        if (purge_wm && purge_wm < last_wm) {
-            //std::cout << "[FINAL] pruge_wm: " << purge_wm << " last_wm: " << last_wm << std::endl;
+        if (purge_wm && purge_wm < _last_wm) {
             purgeArchives(_key_d, purge_wm);
         }
     }
@@ -210,15 +208,23 @@ public:
                   last_wm(0),
                   ignored_tuples(0),
                   hybrid_degree(_hybrid_degree),
-                  keyToJoiners(_keyToJoiners)
+                  keyToJoiners(_keyToJoiners),
+                  expected_keys(0),
+                  detected_keys(0)
     {
         compare_func = [](const wrapper_t &w1, const uint64_t &_idx) { // comparator function of wrapped tuples
             return w1.index < _idx;
         };
         num_inner = _context.getParallelism();
         id_inner = _context.getReplicaIndex();
-        if(join_win_type == Join_Window_t::SLIDE && win_len >= slide_len) {
+        if (join_win_type == Join_Window_t::SLIDE && win_len >= slide_len) {
             growing_lwid_num = ceil((double)win_len / slide_len) - 1; // Number of slides to reach full window size
+        }
+        if (join_mode == Join_Mode_t::HP && keyToJoiners.size()) {
+            for (auto& [key, id_vec]: keyToJoiners) {
+                if (std::find(id_vec.begin(), id_vec.end(), id_inner) != id_vec.end())
+                    expected_keys++;
+            }
         }
     }
 
@@ -238,7 +244,9 @@ public:
                   id_inner(_other.id_inner),
                   num_inner(_other.num_inner),
                   hybrid_degree(_other.hybrid_degree),
-                  keyToJoiners(_other.keyToJoiners) {}
+                  keyToJoiners(_other.keyToJoiners),
+                  expected_keys(_other.expected_keys),
+                  detected_keys(_other.detected_keys) {}
 
     // svc (utilized by the FastFlow runtime)
     void *svc(void *_in) override
@@ -326,37 +334,27 @@ public:
             auto p = keyMap.insert(std::make_pair(key, key_d_t(compare_func)));
             it = p.first;
             last_wms[key] = 0;
+            detected_keys++;
         }
         key_d_t &key_d = (*it).second;
         
         bool should_store_tuple = false;
         uint64_t ts = _timestamp; // the timestamp of the current tuple
-        
-        /* uint64_t min_boundary;
-        if (join_win_type == Join_Window_t::SLIDE) {
-            min_boundary = (key_d.last_lwid >= 0) ? (key_d.last_lwid  * slide_len) : 0;
-        } else {
-            min_boundary = (key_d.last_lwid >= 0) ? win_len + (key_d.last_lwid  * slide_len) : 0;
-        }
 
-        if (ts < min_boundary) { // if the tuple is related to a closed window -> IGNORED
-            if (key_d.last_lwid >= 0) {
+        if (ts < key_d.last_purged_wm) { // if the tuple is related to a closed window of the current key -> IGNORED
 #if defined (WF_TRACING_ENABLED)
                 stats_record.inputs_ignored++;
 #endif
                 ignored_tuples++;
-            }
             return;
-        } */
+        }
 
         long first_w = 0; // determine the wid of the first window containing t
         long last_w = -1; // determine the wid of the last window containing t
 
         if (win_len > slide_len) {
-            //first_w = floor(((double)ts-win_len+1)/slide_len);
             first_w = ceil(((int64_t)ts - (int64_t)win_len + 1) / (double)slide_len);
             last_w = floor((double)(ts)/slide_len);
-            //std::cout << "tuple [ts: " << ts << "] wids: " << first_w << "," << last_w << std::endl;
         } else {
             first_w = floor((double)(ts)/slide_len);
             last_w = first_w;
@@ -388,10 +386,13 @@ public:
                             emit_ts = win_end;
                         }
                         if (join_mode == Join_Mode_t::HP) {
-                            emit_wm = std::min_element(last_wms.begin(), last_wms.end(), [](const auto &p1, const auto &p2) {
-                                return p1.second < p2.second;
-                            })->second;
-                            emit_wm = 0;
+                            if (keyToJoiners.size() && detected_keys >= expected_keys) {
+                                emit_wm = std::min_element(last_wms.begin(), last_wms.end(), [](const auto &p1, const auto &p2) {
+                                    return p1.second < p2.second;
+                                })->second;
+                            } else {
+                                emit_wm = 0;
+                            }
                         } else {
                             emit_wm = _watermark;
                         }
@@ -436,20 +437,20 @@ public:
             assert(last_wms[key] <= _watermark); // sanity check
             if (last_wms[key] < _watermark) {
                 last_wms[key] = _watermark;
-                purgeFiredWinTuples(key_d, first_w); // purge the archives using the new watermark
+                purgeFiredWinTuples(key_d, last_wms[key], first_w); // purge the archives using the new watermark
             }
         }
         else if (this->execution_mode == Execution_Mode_t::DEFAULT) {
             assert(last_wm <= _watermark); // sanity check
             if (last_wm < _watermark) {
                 last_wm = _watermark;
-                purgeFiredWinTuples(key_d, first_w); // purge the archives using the new watermark
+                purgeFiredWinTuples(key_d, last_wm, first_w); // purge the archives using the new watermark
             }
         }
         else {
             if (last_wm < _timestamp) {
                 last_wm = _timestamp;
-                purgeFiredWinTuples(key_d, first_w); // purge the archives using the new watermark
+                purgeFiredWinTuples(key_d, last_wm, first_w); // purge the archives using the new watermark
             }
         }
     }
