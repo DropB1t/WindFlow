@@ -358,77 +358,39 @@ public:
             if (event == win_event_t::IN) { // window is not fired
                 auto bound_pair = win.getWinBounds();
                 // In DP check if the current tuple is in the time partition of the replica
-                if (isStreamA(_tag)) {
-                    std::pair<iterator_t, iterator_t> its;
-                    its = (key_d.archiveB).getJoinRange(bound_pair.first, bound_pair.second);
-                    Iterable<tuple_t> iter_b(its.first, its.second);
-                    /* std::cout << "Window event IN: " << win.getLWID() << " tuple (ts: " << ts << ") of Stream A joining with: " << iter_b.size() <<
-                        " tuples with window bounds: [" << bound_pair.first << " , " << bound_pair.second <<
-                        " ] " << " from replica: " << id_inner << std::endl; */
-                    for (size_t i=0; i<iter_b.size(); i++) { // iterate over the tuples in the archive of stream B
-                        if constexpr (isNonRiched) {
-                            output = func(_tuple, iter_b.at(i));
-                        }
-                        if constexpr (isRiched)  { // inplace riched version
-                            (this->context).setContextParameters(ts, _watermark);
-                            output = func(_tuple, iter_b.at(i), this->context);
-                        }
-                        if (output) {
-                            if (this->execution_mode == Execution_Mode_t::DETERMINISTIC) {
-                                emit_ts = (ts >= iter_b.index_at(i)) ? ts : iter_b.index_at(i);
-                            } else {
-                                emit_ts = win.getResultTimestamp();
-                            }
-                            if (join_mode == Join_Mode_t::HP) {
-                                emit_wm = std::min_element(last_wms.begin(), last_wms.end(), [](const auto &p1, const auto &p2) {
-                                    return p1.second < p2.second;
-                                })->second;
-                                emit_wm = 0;
-                            } else {
-                                emit_wm = _watermark;
-                            }
-                            this->doEmit(this->emitter, &(*output), 0, emit_ts, emit_wm, this); // emit the pair
-#if defined (WF_TRACING_ENABLED)
-                            (this->stats_record).outputs_sent++;
-                            (this->stats_record).bytes_sent += sizeof(result_t);
-#endif
-                        }
+                std::pair<iterator_t, iterator_t> its;
+                its = isStreamA(_tag) ? (key_d.archiveB).getJoinRange(bound_pair.first, bound_pair.second) : (key_d.archiveA).getJoinRange(bound_pair.first, bound_pair.second);
+                Iterable<tuple_t> interval(its.first, its.second);
+                /* std::cout << "Window event IN: " << win.getLWID() << " tuple (ts: " << ts << ") joining with: " << interval.size() <<
+                    " tuples with window bounds: [" << bound_pair.first << " , " << bound_pair.second <<
+                    " ] " << " from replica: " << id_inner << std::endl; */
+                for (size_t i=0; i<interval.size(); i++) {
+                    if constexpr (isNonRiched) {
+                        output = isStreamA(_tag) ? func(_tuple, interval.at(i)) : func(interval.at(i), _tuple);
                     }
-                } else {
-                    std::pair<iterator_t, iterator_t> its;
-                    its = (key_d.archiveA).getJoinRange(bound_pair.first, bound_pair.second);
-                    Iterable<tuple_t> iter_a(its.first, its.second);
-                    /* std::cout << "Window event IN: " << win.getLWID() << " tuple (ts: " << ts << ") of Stream B joining with: " << iter_a.size() <<
-                        " tuples with window bounds: [" << bound_pair.first << " , " << bound_pair.second <<
-                        "] " << " from replica: " << id_inner << std::endl; */
-                    for (size_t i=0; i<iter_a.size(); i++) { // iterate over the tuples in the archive of stream A
-                        if constexpr (isNonRiched) {
-                            output = func(iter_a.at(i), _tuple);
+                    if constexpr (isRiched)  { // inplace riched version
+                        (this->context).setContextParameters(ts, _watermark);
+                        output = isStreamA(_tag) ? func(_tuple, interval.at(i), this->context) : func(interval.at(i), _tuple, this->context);
+                    }
+                    if (output) {
+                        if (this->execution_mode == Execution_Mode_t::DETERMINISTIC) {
+                            emit_ts = (ts >= interval.index_at(i)) ? ts : interval.index_at(i);
+                        } else {
+                            emit_ts = win.getResultTimestamp();
                         }
-                        if constexpr (isRiched)  { // inplace riched version
-                            (this->context).setContextParameters(ts, _watermark);
-                            output = func(iter_a.at(i), _tuple, this->context);
+                        if (join_mode == Join_Mode_t::HP) {
+                            emit_wm = std::min_element(last_wms.begin(), last_wms.end(), [](const auto &p1, const auto &p2) {
+                                return p1.second < p2.second;
+                            })->second;
+                            emit_wm = 0;
+                        } else {
+                            emit_wm = _watermark;
                         }
-                        if (output) {
-                            if (this->execution_mode == Execution_Mode_t::DETERMINISTIC) {
-                                emit_ts = (ts >= iter_a.index_at(i)) ? ts : iter_a.index_at(i);
-                            } else {
-                                emit_ts = win.getResultTimestamp();
-                            }
-                            if (join_mode == Join_Mode_t::HP) {
-                                emit_wm = std::min_element(last_wms.begin(), last_wms.end(), [](const auto &p1, const auto &p2) {
-                                    return p1.second < p2.second;
-                                })->second;
-                                emit_wm = 0;
-                            } else {
-                                emit_wm = _watermark;
-                            }
-                            this->doEmit(this->emitter, &(*output), 0, emit_ts, emit_wm, this); // emit the pair
+                        this->doEmit(this->emitter, &(*output), 0, emit_ts, emit_wm, this); // emit the pair
 #if defined (WF_TRACING_ENABLED)
-                            (this->stats_record).outputs_sent++;
-                            (this->stats_record).bytes_sent += sizeof(result_t);
+                        (this->stats_record).outputs_sent++;
+                        (this->stats_record).bytes_sent += sizeof(result_t);
 #endif
-                        }
                     }
                 }
             }
