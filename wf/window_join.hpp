@@ -159,8 +159,17 @@ private:
     }
 
     void purgeFiredWinTuples(key_d_t &_key_d, uint64_t _last_wm, long _first_w) {
+
+        // compute how many slides elapsed since the last purge for this key
+        double delta = _last_wm <= _key_d.last_purged_wm ? 0.0 : (double)(_last_wm - _key_d.last_purged_wm);
+        double windows_since_purge = ceil(delta / (double)slide_len);
+        double to_purge_windows = ceil((double)win_len / (double)slide_len) + MINIMAL_PURGE_WINDOWS;
+        if (windows_since_purge < to_purge_windows)
+            return; // no need to purge if last purged wm is not too far from the last watermark received
+
         long first_w = _first_w;
         uint64_t purge_wm = 0;
+
         if (first_w > 0 && _last_wm) {
             purge_wm = (first_w * slide_len) - slide_len;
             while(purge_wm && purge_wm >= _last_wm) {
