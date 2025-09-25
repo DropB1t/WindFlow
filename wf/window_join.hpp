@@ -158,6 +158,8 @@ private:
         }
     }
 
+#if 0
+    #define MINIMAL_PURGE_WINDOWS 5 // minimal number of windows to trigger a purge operation
     void purgeFiredWinTuples(key_d_t &_key_d, uint64_t _last_wm, long _first_w) {
 
         // compute how many slides elapsed since the last purge for this key
@@ -193,6 +195,21 @@ private:
             purgeArchives(_key_d, purge_wm);
         }
     }
+#else
+
+    void purgeFiredWinTuples(key_d_t &_key_d, uint64_t _last_wm, long _first_w) {
+        long startWID = 0;
+        if (win_len > slide_len) {
+            startWID = ceil(((int64_t) _last_wm - (int64_t) win_len + 1) / (double) slide_len);
+        }
+        else {
+            startWID = floor((double)(_last_wm) / slide_len);
+        }
+        uint64_t purge_wm = startWID < 0 ? 0 : startWID * slide_len;
+        purgeArchives(_key_d, purge_wm);
+    }
+
+#endif
 
 public:
     // Constructor
